@@ -1,0 +1,29 @@
+# Lint workflow - runs on every push
+# Checks: ruff, pyright, pre-commit hooks
+
+name: Lint
+
+on:
+  push:
+  workflow_call:  # Allow other workflows to call this
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv and set up Python
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run pre-commit hooks
+        run: uv run pre-commit run --all-files

@@ -1,32 +1,32 @@
-# GitHub Actions workflow for building and publishing to PyPI
+# Publish workflow - runs on v* tags
+# Depends on tests passing first
 #
-# CONFIGURATION REQUIRED:
-# 1. Create "pypi" environment in GitHub repo settings:
-#    - Go to Settings > Environments > New environment > Name it "pypi"
-# 2. Configure PyPI Trusted Publisher:
-#    - Go to pypi.org > Your project > Publishing > Add a new pending publisher
-#    - Enter: GitHub org/user, repo name, workflow filename (publish.yml), environment (pypi)
-#
-# TRIGGERING:
-# - Create and push a tag matching vN.N.N (e.g., v1.0.0)
-# - git tag v1.0.0 && git push origin v1.0.0
+# SETUP REQUIRED:
+# 1. Create "pypi" environment in GitHub repo settings
+# 2. Configure PyPI Trusted Publisher at pypi.org
 
-name: Release
+name: Publish
 
 on:
   push:
     tags:
       - v[0-9]+.[0-9]+.[0-9]+
 
+permissions:
+  contents: write
+  id-token: write
+
 jobs:
+  test:
+    name: Test
+    uses: ./.github/workflows/test.yml
+
   build:
-    name: Build and Release
+    name: Build
+    needs: test
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -34,60 +34,60 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-          version: "0.9.9"
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version-file: "pyproject.toml"
 
-      - name: Build
+      - name: Build package
         run: uv build
 
-      - name: Store the distribution packages
+      - name: Upload distributions
         uses: actions/upload-artifact@v5
         with:
           name: python-package-distributions
           path: dist/
 
-      - name: Update CHANGELOG
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download distributions
+        uses: actions/download-artifact@v6
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Generate changelog
         id: changelog
         uses: requarks/changelog-action@v1
         with:
           token: ${{ github.token }}
           tag: ${{ github.ref_name }}
 
-      - name: Create Release
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/*
-            CHANGELOG.md
+          files: dist/*
           body: ${{ steps.changelog.outputs.changes }}
 
-      - name: Commit CHANGELOG.md
-        uses: stefanzweifel/git-auto-commit-action@v7
-        with:
-          branch: master
-          commit_message: "docs: update CHANGELOG.md for ${{ github.ref_name }} [skip ci]"
-          file_pattern: CHANGELOG.md
-
-  publish-to-pypi:
-    name: Publish Python distribution to PyPI
-    needs:
-      - build
+  publish:
+    name: Publish to PyPI
+    needs: build
     runs-on: ubuntu-latest
     environment:
       name: pypi
       url: https://pypi.org/p/dbxdebug
-    permissions:
-      id-token: write
     steps:
-      - name: Download all the dists
+      - name: Download distributions
         uses: actions/download-artifact@v6
         with:
           name: python-package-distributions
           path: dist/
 
-      - name: Publish distribution to PyPI
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
