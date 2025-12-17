@@ -4,7 +4,7 @@ dynamic = ["version"]
 description = "Client library and CLI for DOSBox-X remote debug protocols (GDB and QMP)"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
+license = "LicenseRef-Polyform-Shield-1.0.0"
 authors = [
     { name = "lokkju" }
 ]
@@ -13,7 +13,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
     "Operating System :: POSIX",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",

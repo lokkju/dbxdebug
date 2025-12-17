@@ -1,5 +1,10 @@
 # dbxdebug
 
+[![CI](https://github.com/lokkju/dbxdebug/actions/workflows/test.yml/badge.svg)](https://github.com/lokkju/dbxdebug/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/dbxdebug)](https://pypi.org/project/dbxdebug/)
+[![Python](https://img.shields.io/pypi/pyversions/dbxdebug)](https://pypi.org/project/dbxdebug/)
+[![License](https://img.shields.io/github/license/lokkju/dbxdebug)](https://github.com/lokkju/dbxdebug/blob/main/LICENSE)
+
 Client library and CLI for DOSBox-X remote debug protocols.
 
 ## Features
