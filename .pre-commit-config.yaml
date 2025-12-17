@@ -45,6 +45,7 @@ repos:
         additional_dependencies:
           - click>=8.0
           - loguru>=0.7
+          - pytest>=7.4.0
 
   # Pydoclint for docstring linting (Google style)
   # Disabled for now - too many false positives with internal methods
