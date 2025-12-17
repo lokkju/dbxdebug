@@ -9,7 +9,7 @@ import gzip
 import pickle
 import time
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .video import DOSVideoTools

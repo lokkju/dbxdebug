@@ -1,6 +1,6 @@
 [project]
 name = "dbxdebug"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Client library and CLI for DOSBox-X remote debug protocols (GDB and QMP)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,30 +25,55 @@ dependencies = [
     "loguru>=0.7",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.0",
-    "ruff>=0.1",
-    "pyright>=1.1",
-]
-
 [project.scripts]
 dbxdebug = "dbxdebug.cli:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.8.0",
+    "pyright>=1.1.0",
+    "pre-commit>=3.5.0",
+]
+
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dbxdebug"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.ruff]
-target-version = "py311"
 line-length = 100
+target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W"]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "ARG", # flake8-unused-arguments
+    "SIM", # flake8-simplify
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
 
 [tool.pyright]
+include = ["src/dbxdebug", "tests"]
+exclude = [".venv", "**/__pycache__"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
+reportMissingTypeStubs = false

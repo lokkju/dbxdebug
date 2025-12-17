@@ -14,13 +14,12 @@ import time
 import click
 from loguru import logger
 
-from .gdb import GDBClient
-from .qmp import QMPClient, QMPError
-from .video import DOSVideoTools
-from .utils import hexdump, parse_x86_address
-from .html import dos_video_to_html, analyze_dos_video_colors
 from .capture_io import ScreenRecorder, load_capture
-
+from .gdb import GDBClient
+from .html import analyze_dos_video_colors, dos_video_to_html
+from .qmp import QMPClient, QMPError
+from .utils import hexdump, parse_x86_address
+from .video import DOSVideoTools
 
 # Configure loguru
 logger.remove()
@@ -136,14 +135,17 @@ def cpu_regs(ctx):
         with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
             regs = gdb.read_registers()
             click.echo("General Purpose:")
-            click.echo(f"  EAX={regs['eax']:08X}  ECX={regs['ecx']:08X}  EDX={regs['edx']:08X}  EBX={regs['ebx']:08X}")
-            click.echo(f"  ESP={regs['esp']:08X}  EBP={regs['ebp']:08X}  ESI={regs['esi']:08X}  EDI={regs['edi']:08X}")
+            click.echo(f"  EAX={regs['eax']:08X}  ECX={regs['ecx']:08X}")
+            click.echo(f"  EDX={regs['edx']:08X}  EBX={regs['ebx']:08X}")
+            click.echo(f"  ESP={regs['esp']:08X}  EBP={regs['ebp']:08X}")
+            click.echo(f"  ESI={regs['esi']:08X}  EDI={regs['edi']:08X}")
             click.echo()
             click.echo("Instruction Pointer:")
             click.echo(f"  EIP={regs['eip']:08X}  EFLAGS={regs['eflags']:08X}")
             click.echo()
             click.echo("Segment Registers:")
-            click.echo(f"  CS={regs['cs']:04X}  SS={regs['ss']:04X}  DS={regs['ds']:04X}  ES={regs['es']:04X}  FS={regs['fs']:04X}  GS={regs['gs']:04X}")
+            click.echo(f"  CS={regs['cs']:04X}  SS={regs['ss']:04X}  DS={regs['ds']:04X}")
+            click.echo(f"  ES={regs['es']:04X}  FS={regs['fs']:04X}  GS={regs['gs']:04X}")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -405,8 +407,14 @@ def screen_show(ctx):
 
 @screen.command("capture")
 @click.option("-o", "--output", default="screen", help="Output filename (without extension)")
-@click.option("-f", "--format", "fmt", type=click.Choice(["raw", "html", "text"]),
-              default="raw", help="Output format (default: raw)")
+@click.option(
+    "-f",
+    "--format",
+    "fmt",
+    type=click.Choice(["raw", "html", "text"]),
+    default="raw",
+    help="Output format (default: raw)",
+)
 @click.pass_context
 def screen_capture(ctx, output: str, fmt: str):
     """Save single screen frame to file.
@@ -585,12 +593,12 @@ def screen_colors(ctx, capture_file: str | None):
         click.echo(f"Blink used: {'Yes' if summary['blink_used'] else 'No'}")
 
         click.echo("\nForeground colors:")
-        for color in analysis["foreground_colors"]:
-            click.echo(f"  {color['id']:2d} {color['name']:<14} {color['count']:5d} ({color['percentage']:5.1f}%)")
+        for c in analysis["foreground_colors"]:
+            click.echo(f"  {c['id']:2d} {c['name']:<14} {c['count']:5d} ({c['percentage']:5.1f}%)")
 
         click.echo("\nBackground colors:")
-        for color in analysis["background_colors"]:
-            click.echo(f"  {color['id']:2d} {color['name']:<14} {color['count']:5d} ({color['percentage']:5.1f}%)")
+        for c in analysis["background_colors"]:
+            click.echo(f"  {c['id']:2d} {c['name']:<14} {c['count']:5d} ({c['percentage']:5.1f}%)")
 
     except Exception as e:
         click.echo(f"Error: {e}", err=True)

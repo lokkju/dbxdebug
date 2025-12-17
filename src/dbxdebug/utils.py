@@ -37,11 +37,11 @@ def parse_x86_address(address_str: str | int) -> int:
     # Try to interpret as a normal hex or decimal number
     try:
         return int(address_str, 0)
-    except ValueError:
+    except ValueError as e:
         raise ValueError(
             f"Invalid address format: {address_str}. "
             "Use segment:offset (e.g., b800:0000) or linear address."
-        )
+        ) from e
 
 
 def hexdump(

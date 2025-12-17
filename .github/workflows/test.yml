@@ -1,0 +1,50 @@
+# GitHub Actions workflow for testing
+#
+# Runs on every push and pull request:
+# - Pre-commit hooks (linting, formatting, type checking, secret scanning)
+# - Tests across multiple Python versions in parallel
+
+name: Test
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    name: Pre-commit checks (linting, formatting, type checking, secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Uv and set up Python
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run pre-commit hooks
+        run: uv run pre-commit run --all-files
+
+  test:
+    name: Test on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Uv and set up Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install the project dependencies
+        run: uv sync --locked
+
+      - name: Run tests
+        run: uv run pytest tests -v

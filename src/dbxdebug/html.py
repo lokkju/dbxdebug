@@ -351,8 +351,8 @@ def analyze_dos_video_colors(video_pages: list[bytes], cols: int = 80, rows: int
                 "fg_colors": len(page_fg_colors),
                 "bg_colors": len(page_bg_colors),
                 "combinations": len(page_combinations),
-                "fg_color_list": sorted(list(page_fg_colors)),
-                "bg_color_list": sorted(list(page_bg_colors)),
+                "fg_color_list": sorted(page_fg_colors),
+                "bg_color_list": sorted(page_bg_colors),
                 "bounds": {
                     "min_col": page_min_col if page_content_cells > 0 else None,
                     "max_col": page_max_col if page_content_cells > 0 else None,
@@ -443,8 +443,8 @@ def analyze_dos_video_colors(video_pages: list[bytes], cols: int = 80, rows: int
         "color_combinations": combination_info,
         "page_statistics": page_stats,
         "raw_data": {
-            "fg_color_ids": sorted(list(fg_colors)),
-            "bg_color_ids": sorted(list(bg_colors)),
+            "fg_color_ids": sorted(fg_colors),
+            "bg_color_ids": sorted(bg_colors),
             "fg_counts": fg_color_counts,
             "bg_counts": bg_color_counts,
             "combination_counts": combination_counts,
@@ -538,7 +538,8 @@ def dos_video_to_html(video_data: bytes, cols: int = 80, rows: int = 25) -> str:
             if blink:
                 css_class += " blink"
 
-            html += f'<span class="{css_class}" style="color: {fg_color}; background-color: {bg_color};">{char_html}</span>'
+            style = f"color: {fg_color}; background-color: {bg_color};"
+            html += f'<span class="{css_class}" style="{style}">{char_html}</span>'
 
         html += "</div>\n"
 
@@ -549,7 +550,9 @@ def dos_video_to_html(video_data: bytes, cols: int = 80, rows: int = 25) -> str:
     return html
 
 
-def save_dos_video_html(video_data: bytes, filename: str = "dos_video.html", cols: int = 80, rows: int = 25) -> None:
+def save_dos_video_html(
+    video_data: bytes, filename: str = "dos_video.html", cols: int = 80, rows: int = 25
+) -> None:
     """Save DOS video data as HTML file."""
     html = dos_video_to_html(video_data, cols, rows)
     with open(filename, "w", encoding="utf-8") as f:

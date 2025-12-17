@@ -1,0 +1,81 @@
+# Pre-commit hooks configuration
+# Install: uv run pre-commit install --install-hooks
+# Install commit-msg hook: uv run pre-commit install --hook-type commit-msg
+# Run manually: uv run pre-commit run --all-files
+
+repos:
+  # Standard pre-commit hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-ast
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-docstring-first
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-added-large-files
+      - id: debug-statements
+      - id: name-tests-test
+        args: ["--pytest-test-first"]
+
+  # Gitleaks for secret scanning
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+
+  # Ruff for linting and formatting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      - id: ruff
+        types_or: [python, pyi]
+        args: [--fix]
+      - id: ruff-format
+        types_or: [python, pyi]
+
+  # Pyright for type checking
+  - repo: https://github.com/RobertCraigie/pyright-python
+    rev: v1.1.390
+    hooks:
+      - id: pyright
+        additional_dependencies:
+          - click>=8.0
+          - loguru>=0.7
+
+  # Pydoclint for docstring linting (Google style)
+  # Disabled for now - too many false positives with internal methods
+  # - repo: https://github.com/jsh9/pydoclint
+  #   rev: 0.5.9
+  #   hooks:
+  #     - id: pydoclint
+  #       args:
+  #         - --style=google
+  #         - --check-return-types=False
+  #         - --arg-type-hints-in-docstring=False
+  #         - --check-class-attributes=False
+  #         - --skip-checking-short-docstrings=False
+  #         - --allow-init-docstring=True
+  #       exclude: ^(tests/|src/dbxdebug/cli\.py)
+
+  # Commitizen for commit message linting (Conventional Commits)
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v3.29.1
+    hooks:
+      - id: commitizen
+        stages: [commit-msg]
+
+  # Actionlint for GitHub Actions workflow linting
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.4
+    hooks:
+      - id: actionlint
+
+  # UV for dependency management - ensures uv.lock is synced
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.7.13
+    hooks:
+      - id: uv-lock
