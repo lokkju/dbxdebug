@@ -1,13 +1,15 @@
 """
 Command-line interface for DOSBox-X remote debugging.
 
-Usage:
-    dbxdebug gdb <command>     - GDB debugging operations
-    dbxdebug qmp <command>     - QMP keyboard operations
-    dbxdebug screen <command>  - Screen capture operations
+Commands:
+    dbxdebug mem <command>     - Memory operations (via GDB)
+    dbxdebug cpu <command>     - CPU state and execution control (via GDB)
+    dbxdebug key <command>     - Keyboard input (via QMP)
+    dbxdebug screen <command>  - Screen capture and recording
 """
 
 import sys
+import time
 
 import click
 from loguru import logger
@@ -16,7 +18,8 @@ from .gdb import GDBClient
 from .qmp import QMPClient, QMPError
 from .video import DOSVideoTools
 from .utils import hexdump, parse_x86_address
-from .html import dos_video_to_html
+from .html import dos_video_to_html, analyze_dos_video_colors
+from .capture_io import ScreenRecorder, load_capture
 
 
 # Configure loguru
@@ -27,8 +30,13 @@ logger.add(sys.stderr, level="WARNING")
 @click.group()
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")
 @click.option("--debug", is_flag=True, help="Enable debug logging")
+@click.version_option(version="0.1.0")
 def main(verbose: bool, debug: bool):
-    """DOSBox-X remote debug client."""
+    """DOSBox-X remote debug client.
+
+    Connects to DOSBox-X GDB server (port 2159) for debugging and memory access,
+    and QMP server (port 4444) for keyboard input.
+    """
     if debug:
         logger.remove()
         logger.add(sys.stderr, level="DEBUG")
@@ -38,31 +46,38 @@ def main(verbose: bool, debug: bool):
 
 
 # =============================================================================
-# GDB Commands
+# Memory Commands (GDB)
 # =============================================================================
 
 
 @main.group()
-@click.option("--host", default="localhost", help="GDB server host")
-@click.option("--port", default=2159, help="GDB server port")
+@click.option("--host", default="localhost", help="GDB server hostname")
+@click.option("--port", default=2159, help="GDB server port (default: 2159)")
 @click.pass_context
-def gdb(ctx, host: str, port: int):
-    """GDB debugging commands."""
+def mem(ctx, host: str, port: int):
+    """Memory read/write operations via GDB protocol."""
     ctx.ensure_object(dict)
     ctx.obj["gdb_host"] = host
     ctx.obj["gdb_port"] = port
 
 
-@gdb.command("read-mem")
-@click.argument("address")
-@click.argument("length", type=int)
-@click.option("--hex", "output_hex", is_flag=True, help="Output as hex dump")
+@mem.command("read")
+@click.argument("address", metavar="ADDRESS")
+@click.argument("length", type=int, metavar="LENGTH")
+@click.option("--hex", "output_hex", is_flag=True, help="Format output as hex dump")
 @click.pass_context
-def gdb_read_mem(ctx, address: str, length: int, output_hex: bool):
-    """Read memory from target."""
+def mem_read(ctx, address: str, length: int, output_hex: bool):
+    """Read LENGTH bytes from ADDRESS.
+
+    ADDRESS can be segment:offset (e.g., b800:0000) or linear (e.g., 0xb8000).
+
+    Examples:
+        dbxdebug mem read b800:0000 4000 --hex
+        dbxdebug mem read 0x1000 256
+    """
     try:
-        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb_client:
-            data = gdb_client.read_memory(address, length)
+        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+            data = gdb.read_memory(address, length)
             if output_hex:
                 linear = parse_x86_address(address)
                 for line in hexdump(data, start_addr=linear):
@@ -74,30 +89,52 @@ def gdb_read_mem(ctx, address: str, length: int, output_hex: bool):
         sys.exit(1)
 
 
-@gdb.command("write-mem")
-@click.argument("address")
-@click.argument("data")
+@mem.command("write")
+@click.argument("address", metavar="ADDRESS")
+@click.argument("hexdata", metavar="HEXDATA")
 @click.pass_context
-def gdb_write_mem(ctx, address: str, data: str):
-    """Write memory to target. DATA is hex string (e.g., 'deadbeef')."""
+def mem_write(ctx, address: str, hexdata: str):
+    """Write HEXDATA bytes to ADDRESS.
+
+    HEXDATA is a hex string without spaces (e.g., 'deadbeef').
+
+    Examples:
+        dbxdebug mem write 0x1000 90909090
+        dbxdebug mem write b800:0000 4142
+    """
     try:
-        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb_client:
-            data_bytes = bytes.fromhex(data)
-            gdb_client.write_memory(address, data_bytes)
-            click.echo(f"Wrote {len(data_bytes)} bytes to {address}")
+        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+            data = bytes.fromhex(hexdata)
+            gdb.write_memory(address, data)
+            click.echo(f"Wrote {len(data)} bytes to {address}")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
 
-@gdb.command("registers")
+# =============================================================================
+# CPU Commands (GDB)
+# =============================================================================
+
+
+@main.group()
+@click.option("--host", default="localhost", help="GDB server hostname")
+@click.option("--port", default=2159, help="GDB server port (default: 2159)")
 @click.pass_context
-def gdb_registers(ctx):
-    """Read CPU registers."""
+def cpu(ctx, host: str, port: int):
+    """CPU registers and execution control via GDB protocol."""
+    ctx.ensure_object(dict)
+    ctx.obj["gdb_host"] = host
+    ctx.obj["gdb_port"] = port
+
+
+@cpu.command("regs")
+@click.pass_context
+def cpu_regs(ctx):
+    """Display all CPU registers."""
     try:
-        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb_client:
-            regs = gdb_client.read_registers()
-            # Format output
+        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+            regs = gdb.read_registers()
             click.echo("General Purpose:")
             click.echo(f"  EAX={regs['eax']:08X}  ECX={regs['ecx']:08X}  EDX={regs['edx']:08X}  EBX={regs['ebx']:08X}")
             click.echo(f"  ESP={regs['esp']:08X}  EBP={regs['ebp']:08X}  ESI={regs['esi']:08X}  EDI={regs['edi']:08X}")
@@ -112,15 +149,20 @@ def gdb_registers(ctx):
         sys.exit(1)
 
 
-@gdb.command("break")
-@click.argument("address")
+@cpu.command("break")
+@click.argument("address", metavar="ADDRESS")
 @click.pass_context
-def gdb_break(ctx, address: str):
-    """Set breakpoint at address."""
+def cpu_break(ctx, address: str):
+    """Set software breakpoint at ADDRESS.
+
+    Example:
+        dbxdebug cpu break 0x1000
+    """
     try:
-        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb_client:
-            if gdb_client.set_breakpoint(address):
-                click.echo(f"Breakpoint set at {address}")
+        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+            if gdb.set_breakpoint(address):
+                linear = parse_x86_address(address)
+                click.echo(f"Breakpoint set at 0x{linear:X}")
             else:
                 click.echo(f"Failed to set breakpoint at {address}", err=True)
                 sys.exit(1)
@@ -129,28 +171,50 @@ def gdb_break(ctx, address: str):
         sys.exit(1)
 
 
-@gdb.command("step")
+@cpu.command("delete")
+@click.argument("address", metavar="ADDRESS")
 @click.pass_context
-def gdb_step(ctx):
-    """Single-step one instruction."""
+def cpu_delete(ctx, address: str):
+    """Remove breakpoint at ADDRESS.
+
+    Example:
+        dbxdebug cpu delete 0x1000
+    """
     try:
-        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb_client:
-            response = gdb_client.step()
-            click.echo(f"Stop reason: {response.decode()}")
+        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+            if gdb.remove_breakpoint(address):
+                linear = parse_x86_address(address)
+                click.echo(f"Breakpoint removed at 0x{linear:X}")
+            else:
+                click.echo(f"No breakpoint at {address}", err=True)
+                sys.exit(1)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
 
-@gdb.command("continue")
+@cpu.command("step")
 @click.pass_context
-def gdb_continue(ctx):
-    """Continue execution."""
+def cpu_step(ctx):
+    """Execute single instruction and stop."""
     try:
-        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb_client:
+        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+            response = gdb.step()
+            click.echo(f"Stopped: {response.decode()}")
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@cpu.command("cont")
+@click.pass_context
+def cpu_cont(ctx):
+    """Continue execution until breakpoint or Ctrl+C."""
+    try:
+        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
             click.echo("Continuing... (Ctrl+C to interrupt)")
-            response = gdb_client.continue_execution()
-            click.echo(f"Stop reason: {response.decode()}")
+            response = gdb.continue_execution()
+            click.echo(f"Stopped: {response.decode()}")
     except KeyboardInterrupt:
         click.echo("\nInterrupted")
     except Exception as e:
@@ -158,86 +222,147 @@ def gdb_continue(ctx):
         sys.exit(1)
 
 
+@cpu.command("halt")
+@click.pass_context
+def cpu_halt(ctx):
+    """Break into debugger (stop execution)."""
+    try:
+        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+            response = gdb.halt()
+            click.echo(f"Halted: {response.decode()}")
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
 # =============================================================================
-# QMP Commands
+# Keyboard Commands (QMP)
 # =============================================================================
 
 
 @main.group()
-@click.option("--host", default="localhost", help="QMP server host")
-@click.option("--port", default=4444, help="QMP server port")
+@click.option("--host", default="localhost", help="QMP server hostname")
+@click.option("--port", default=4444, help="QMP server port (default: 4444)")
 @click.pass_context
-def qmp(ctx, host: str, port: int):
-    """QMP keyboard commands."""
+def key(ctx, host: str, port: int):
+    """Keyboard input via QMP protocol."""
     ctx.ensure_object(dict)
     ctx.obj["qmp_host"] = host
     ctx.obj["qmp_port"] = port
 
 
-@qmp.command("key")
-@click.argument("keys", nargs=-1, required=True)
-@click.option("--hold", default=100, help="Hold time in ms")
+@key.command("send")
+@click.argument("keys", nargs=-1, required=True, metavar="KEY...")
+@click.option("--hold", default=100, help="Hold time in milliseconds (default: 100)")
 @click.pass_context
-def qmp_key(ctx, keys: tuple[str, ...], hold: int):
-    """
-    Send key press(es).
+def key_send(ctx, keys: tuple[str, ...], hold: int):
+    """Send key chord (simultaneous key presses).
 
-    KEYS are QMP qcode names like 'a', 'ctrl', 'ret', 'f1'.
-    Multiple keys are pressed simultaneously (chord).
+    KEYS are QMP qcode names. Multiple keys are pressed together.
+
+    Common qcodes: a-z, 0-9, f1-f12, ctrl, shift, alt, ret (Enter),
+    spc (Space), esc, tab, backspace, delete, insert, home, end,
+    pgup, pgdn, left, right, up, down.
 
     Examples:
-        dbxdebug qmp key a
-        dbxdebug qmp key ctrl c
-        dbxdebug qmp key ctrl alt delete
+        dbxdebug key send a
+        dbxdebug key send ctrl c
+        dbxdebug key send ctrl alt delete
     """
     try:
-        with QMPClient(ctx.obj["qmp_host"], ctx.obj["qmp_port"]) as qmp_client:
-            qmp_client.send_key(list(keys), hold)
+        with QMPClient(ctx.obj["qmp_host"], ctx.obj["qmp_port"]) as qmp:
+            qmp.send_key(list(keys), hold)
             click.echo(f"Sent: {' + '.join(keys)}")
     except QMPError as e:
-        click.echo(f"QMP Error: {e}", err=True)
+        click.echo(f"QMP error: {e}", err=True)
         sys.exit(1)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
 
-@qmp.command("type")
-@click.argument("text")
-@click.option("--delay", default=0.05, help="Delay between keys in seconds")
+@key.command("type")
+@click.argument("text", metavar="TEXT")
+@click.option("--delay", default=0.05, help="Delay between keys in seconds (default: 0.05)")
 @click.pass_context
-def qmp_type(ctx, text: str, delay: float):
-    """
-    Type text string.
+def key_type(ctx, text: str, delay: float):
+    """Type a text string character by character.
 
-    Handles shift for uppercase and special characters.
+    Automatically handles shift for uppercase letters and symbols.
 
     Example:
-        dbxdebug qmp type "Hello World!"
+        dbxdebug key type "Hello World!"
     """
     try:
-        with QMPClient(ctx.obj["qmp_host"], ctx.obj["qmp_port"]) as qmp_client:
-            qmp_client.type_text(text, delay)
+        with QMPClient(ctx.obj["qmp_host"], ctx.obj["qmp_port"]) as qmp:
+            qmp.type_text(text, delay)
             click.echo(f"Typed: {text}")
     except QMPError as e:
-        click.echo(f"QMP Error: {e}", err=True)
+        click.echo(f"QMP error: {e}", err=True)
         sys.exit(1)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
 
-@qmp.command("commands")
+@key.command("down")
+@click.argument("keycode", metavar="KEY")
 @click.pass_context
-def qmp_commands(ctx):
-    """List available QMP commands."""
+def key_down(ctx, keycode: str):
+    """Press and hold a key (no release).
+
+    Use 'key up' to release. Useful for modifier keys.
+
+    Example:
+        dbxdebug key down shift
+        dbxdebug key send a
+        dbxdebug key up shift
+    """
     try:
-        with QMPClient(ctx.obj["qmp_host"], ctx.obj["qmp_port"]) as qmp_client:
-            commands = qmp_client.query_commands()
-            for cmd in sorted(commands):
-                click.echo(cmd)
+        with QMPClient(ctx.obj["qmp_host"], ctx.obj["qmp_port"]) as qmp:
+            qmp.key_down(keycode)
+            click.echo(f"Key down: {keycode}")
     except QMPError as e:
-        click.echo(f"QMP Error: {e}", err=True)
+        click.echo(f"QMP error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@key.command("up")
+@click.argument("keycode", metavar="KEY")
+@click.pass_context
+def key_up(ctx, keycode: str):
+    """Release a held key.
+
+    Example:
+        dbxdebug key up shift
+    """
+    try:
+        with QMPClient(ctx.obj["qmp_host"], ctx.obj["qmp_port"]) as qmp:
+            qmp.key_up(keycode)
+            click.echo(f"Key up: {keycode}")
+    except QMPError as e:
+        click.echo(f"QMP error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@key.command("list")
+@click.pass_context
+def key_list_cmd(ctx):
+    """List available QMP commands on server."""
+    try:
+        with QMPClient(ctx.obj["qmp_host"], ctx.obj["qmp_port"]) as qmp:
+            commands = qmp.query_commands()
+            click.echo("Available QMP commands:")
+            for cmd in sorted(commands):
+                click.echo(f"  {cmd}")
+    except QMPError as e:
+        click.echo(f"QMP error: {e}", err=True)
         sys.exit(1)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
@@ -245,26 +370,29 @@ def qmp_commands(ctx):
 
 
 # =============================================================================
-# Screen Commands
+# Screen Commands (GDB memory access)
 # =============================================================================
 
 
 @main.group()
-@click.option("--host", default="localhost", help="GDB server host")
-@click.option("--port", default=2159, help="GDB server port")
+@click.option("--host", default="localhost", help="GDB server hostname")
+@click.option("--port", default=2159, help="GDB server port (default: 2159)")
 @click.pass_context
 def screen(ctx, host: str, port: int):
-    """Screen capture commands."""
+    """Screen capture and video memory access."""
     ctx.ensure_object(dict)
     ctx.obj["gdb_host"] = host
     ctx.obj["gdb_port"] = port
 
 
 @screen.command("dump")
-@click.option("--raw", is_flag=True, help="Output raw video memory (with attributes)")
+@click.option("--raw", is_flag=True, help="Output raw bytes (char+attr pairs)")
 @click.pass_context
 def screen_dump(ctx, raw: bool):
-    """Dump current screen contents."""
+    """Dump current DOS text screen (80x25).
+
+    By default outputs text only. Use --raw for video memory with attributes.
+    """
     try:
         with DOSVideoTools(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as video:
             if raw:
@@ -291,7 +419,10 @@ def screen_dump(ctx, raw: bool):
 @click.option("-o", "--output", default="screen.html", help="Output filename")
 @click.pass_context
 def screen_html(ctx, output: str):
-    """Save screen as HTML with colors."""
+    """Export screen as HTML with VGA colors.
+
+    Creates an HTML file with the DOS screen rendered using VGA color palette.
+    """
     try:
         with DOSVideoTools(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as video:
             data = video.screen_raw()
@@ -308,35 +439,152 @@ def screen_html(ctx, output: str):
         sys.exit(1)
 
 
+@screen.command("info")
+@click.pass_context
+def screen_info(ctx):
+    """Show video mode and BIOS timer info."""
+    try:
+        with DOSVideoTools(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as video:
+            mode = video.read_video_mode()
+            ticks = video.read_timer_ticks()
+            click.echo(f"Video mode: {mode} (0x{mode:02X})" if mode else "Video mode: unknown")
+            click.echo(f"BIOS ticks: {ticks}" if ticks else "BIOS ticks: unknown")
+            if ticks:
+                seconds = ticks / 18.2065
+                click.echo(f"Uptime: {seconds:.1f}s ({seconds/60:.1f}m)")
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
 @screen.command("watch")
-@click.option("--interval", default=0.5, help="Update interval in seconds")
+@click.option("-i", "--interval", default=0.5, help="Update interval in seconds")
 @click.pass_context
 def screen_watch(ctx, interval: float):
-    """Watch screen in real-time (Ctrl+C to stop)."""
-    import time
-
+    """Watch screen in real-time. Press Ctrl+C to stop."""
     try:
         with DOSVideoTools(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as video:
             click.echo("Watching screen... (Ctrl+C to stop)\n")
             while True:
-                # Clear screen and move cursor to top
-                click.echo("\033[2J\033[H", nl=False)
-
+                click.echo("\033[2J\033[H", nl=False)  # Clear and home
                 lines, ticks = video.screen_dump_with_ticks()
                 if lines:
                     for line in lines:
                         click.echo(line)
                     if ticks is not None:
-                        click.echo(f"\nTicks: {ticks}")
+                        click.echo(f"\n[Ticks: {ticks}]")
                 else:
                     click.echo("Failed to read screen")
-
                 time.sleep(interval)
     except KeyboardInterrupt:
         click.echo("\nStopped")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+
+
+@screen.command("record")
+@click.option("-o", "--output", default="capture.capture.gz", help="Output filename")
+@click.option("-d", "--duration", default=10.0, help="Duration in seconds")
+@click.option("-r", "--rate", default=50.0, help="Sample rate in Hz")
+@click.option("--raw", is_flag=True, help="Capture raw bytes (with attributes)")
+@click.pass_context
+def screen_record(ctx, output: str, duration: float, rate: float, raw: bool):
+    """Record screen captures to a .capture.gz file.
+
+    Creates a timestamped capture file for later analysis.
+
+    Example:
+        dbxdebug screen record -d 60 -r 30 -o session.capture.gz
+    """
+    try:
+        with DOSVideoTools(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as video:
+            recorder = ScreenRecorder({"duration": duration, "sample_rate": rate})
+            total_samples = int(duration * rate)
+
+            click.echo(f"Recording {duration}s at {rate}Hz ({total_samples} frames)...")
+
+            with click.progressbar(length=total_samples, label="Recording") as bar:
+                sample_interval = 1.0 / rate
+                start_time = time.time()
+                capture_fn = recorder.capture_raw if raw else recorder.capture
+
+                for i in range(total_samples):
+                    capture_fn(video)
+                    bar.update(1)
+
+                    elapsed = time.time() - start_time
+                    next_sample = (i + 1) * sample_interval
+                    if (sleep_time := next_sample - elapsed) > 0:
+                        time.sleep(sleep_time)
+
+            recorder.save(output)
+            click.echo(f"Saved {len(recorder)} frames to {output}")
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@screen.command("colors")
+@click.argument("capture_file", type=click.Path(exists=True), required=False)
+@click.pass_context
+def screen_colors(ctx, capture_file: str | None):
+    """Analyze colors in current screen or capture file.
+
+    Without argument, analyzes live screen. With file, analyzes capture.
+    """
+    try:
+        if capture_file:
+            data = load_capture(capture_file)
+            screens = data.get("screens", data)
+            # Get first raw screen from capture
+            if isinstance(screens, dict):
+                first_key = next(iter(screens))
+                video_data = screens[first_key]
+                if isinstance(video_data, list):
+                    click.echo("Capture contains text-only screens (no color data)")
+                    return
+                pages = [video_data]
+            else:
+                pages = [screens]
+        else:
+            with DOSVideoTools(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as video:
+                raw = video.screen_raw()
+                if not raw:
+                    click.echo("Failed to read screen", err=True)
+                    sys.exit(1)
+                pages = [raw]
+
+        analysis = analyze_dos_video_colors(pages)
+        summary = analysis["summary"]
+
+        click.echo(f"Cells analyzed: {summary['total_cells']}")
+        click.echo(f"Content cells: {summary['content_cells']}")
+        click.echo(f"Foreground colors: {summary['unique_fg_colors']}")
+        click.echo(f"Background colors: {summary['unique_bg_colors']}")
+        click.echo(f"Color combinations: {summary['unique_combinations']}")
+        click.echo(f"Blink used: {'Yes' if summary['blink_used'] else 'No'}")
+
+        click.echo("\nForeground colors:")
+        for color in analysis["foreground_colors"]:
+            click.echo(f"  {color['id']:2d} {color['name']:<14} {color['count']:5d} ({color['percentage']:5.1f}%)")
+
+        click.echo("\nBackground colors:")
+        for color in analysis["background_colors"]:
+            click.echo(f"  {color['id']:2d} {color['name']:<14} {color['count']:5d} ({color['percentage']:5.1f}%)")
+
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+# =============================================================================
+# Backwards compatibility aliases
+# =============================================================================
+
+# Keep old 'gdb' and 'qmp' as aliases
+main.add_command(mem, name="gdb")  # gdb is alias for mem
+main.add_command(key, name="qmp")  # qmp is alias for key
 
 
 if __name__ == "__main__":

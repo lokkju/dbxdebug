@@ -63,7 +63,7 @@ from .html import (
     VGA_COLORS,
     VGA_COLOR_NAMES,
 )
-from .capture_io import load_capture, save_capture, get_capture_path
+from .capture_io import ScreenRecorder, load_capture, save_capture, get_capture_path
 
 __version__ = "0.1.0"
 
@@ -122,6 +122,7 @@ __all__ = [
     "ALT_F4",
     "ALT_TAB",
     # Capture I/O
+    "ScreenRecorder",
     "load_capture",
     "save_capture",
     "get_capture_path",
