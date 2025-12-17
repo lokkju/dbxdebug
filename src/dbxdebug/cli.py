@@ -385,55 +385,74 @@ def screen(ctx, host: str, port: int):
     ctx.obj["gdb_port"] = port
 
 
-@screen.command("dump")
-@click.option("--raw", is_flag=True, help="Output raw bytes (char+attr pairs)")
+@screen.command("show")
 @click.pass_context
-def screen_dump(ctx, raw: bool):
-    """Dump current DOS text screen (80x25).
-
-    By default outputs text only. Use --raw for video memory with attributes.
-    """
+def screen_show(ctx):
+    """Display current DOS text screen (80x25) to stdout."""
     try:
         with DOSVideoTools(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as video:
-            if raw:
-                data = video.screen_raw()
-                if data:
-                    sys.stdout.buffer.write(data)
-                else:
-                    click.echo("Failed to read screen", err=True)
-                    sys.exit(1)
+            lines = video.screen_dump()
+            if lines:
+                for line in lines:
+                    click.echo(line)
             else:
-                lines = video.screen_dump()
-                if lines:
-                    for line in lines:
-                        click.echo(line)
-                else:
-                    click.echo("Failed to read screen", err=True)
-                    sys.exit(1)
+                click.echo("Failed to read screen", err=True)
+                sys.exit(1)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
 
-@screen.command("html")
-@click.option("-o", "--output", default="screen.html", help="Output filename")
+@screen.command("capture")
+@click.option("-o", "--output", default="screen", help="Output filename (without extension)")
+@click.option("-f", "--format", "fmt", type=click.Choice(["raw", "html", "text"]),
+              default="raw", help="Output format (default: raw)")
 @click.pass_context
-def screen_html(ctx, output: str):
-    """Export screen as HTML with VGA colors.
+def screen_capture(ctx, output: str, fmt: str):
+    """Save single screen frame to file.
 
-    Creates an HTML file with the DOS screen rendered using VGA color palette.
+    Formats:
+      raw  - Binary video memory with attributes (.bin)
+      html - Rendered HTML with VGA colors (.html)
+      text - Plain text, 80x25 characters (.txt)
+
+    Examples:
+        dbxdebug screen capture -o snapshot
+        dbxdebug screen capture -f html -o pretty
     """
     try:
         with DOSVideoTools(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as video:
-            data = video.screen_raw()
-            if data:
+            if fmt == "raw":
+                data = video.screen_raw()
+                if not data:
+                    click.echo("Failed to read screen", err=True)
+                    sys.exit(1)
+                filename = f"{output}.bin" if not output.endswith(".bin") else output
+                with open(filename, "wb") as f:
+                    f.write(data)
+                click.echo(f"Saved raw video memory to {filename}")
+
+            elif fmt == "html":
+                data = video.screen_raw()
+                if not data:
+                    click.echo("Failed to read screen", err=True)
+                    sys.exit(1)
+                filename = f"{output}.html" if not output.endswith(".html") else output
                 html = dos_video_to_html(data)
-                with open(output, "w", encoding="utf-8") as f:
+                with open(filename, "w", encoding="utf-8") as f:
                     f.write(html)
-                click.echo(f"Saved to {output}")
-            else:
-                click.echo("Failed to read screen", err=True)
-                sys.exit(1)
+                click.echo(f"Saved HTML to {filename}")
+
+            elif fmt == "text":
+                lines = video.screen_dump()
+                if not lines:
+                    click.echo("Failed to read screen", err=True)
+                    sys.exit(1)
+                filename = f"{output}.txt" if not output.endswith(".txt") else output
+                with open(filename, "w", encoding="utf-8") as f:
+                    f.write("\n".join(lines))
+                click.echo(f"Saved text to {filename}")
+
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
