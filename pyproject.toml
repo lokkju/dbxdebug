@@ -35,6 +35,7 @@ dev = [
     "ruff>=0.8.0",
     "pyright>=1.1.0",
     "pre-commit>=3.5.0",
+    "commitizen>=3.29.0",
 ]
 
 [build-system]
@@ -77,3 +78,12 @@ exclude = [".venv", "**/__pycache__"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
 reportMissingTypeStubs = false
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+tag_format = "v$version"
+version_scheme = "pep440"
+version_provider = "scm"  # Read current version from git tags
+major_version_zero = true  # Allow breaking changes in 0.x without major bump
+# Use `cz bump --dry-run` to calculate next version from commits
+# Then `git tag v<version>` - hatch-vcs uses the tag for package version
