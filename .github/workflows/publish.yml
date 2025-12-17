@@ -1,5 +1,5 @@
 # Publish workflow - runs on v* tags
-# Depends on tests passing first
+# Uses artifacts from test workflow, publishes to PyPI
 #
 # SETUP REQUIRED:
 # 1. Create "pypi" environment in GitHub repo settings
@@ -18,46 +18,18 @@ permissions:
 
 jobs:
   test:
-    name: Test
+    name: Test & Build
     uses: ./.github/workflows/test.yml
-
-  build:
-    name: Build
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version-file: "pyproject.toml"
-
-      - name: Build package
-        run: uv build
-
-      - name: Upload distributions
-        uses: actions/upload-artifact@v5
-        with:
-          name: python-package-distributions
-          path: dist/
 
   release:
     name: Create GitHub Release
-    needs: build
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
       - name: Download distributions
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v4
         with:
           name: python-package-distributions
           path: dist/
@@ -77,14 +49,14 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: test
     runs-on: ubuntu-latest
     environment:
       name: pypi
       url: https://pypi.org/p/dbxdebug
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v4
         with:
           name: python-package-distributions
           path: dist/

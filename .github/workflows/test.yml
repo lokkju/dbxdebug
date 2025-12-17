@@ -1,5 +1,5 @@
 # Test workflow - runs on push/PR to main
-# Depends on lint passing first
+# Builds and uploads artifacts for reuse by publish workflow
 
 name: Test
 
@@ -8,7 +8,11 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
-  workflow_call:  # Allow other workflows to call this
+  workflow_call:
+    outputs:
+      artifact-name:
+        description: "Name of uploaded artifact"
+        value: ${{ jobs.build.outputs.artifact-name }}
 
 permissions:
   contents: read
@@ -38,3 +42,32 @@ jobs:
 
       - name: Run tests
         run: uv run pytest tests -v
+
+  build:
+    name: Build
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: python-package-distributions
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # Need full history for hatch-vcs
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: "pyproject.toml"
+
+      - name: Build package
+        run: uv build
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v5
+        with:
+          name: python-package-distributions
+          path: dist/
+          retention-days: 1
