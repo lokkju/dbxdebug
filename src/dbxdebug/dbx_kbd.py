@@ -350,32 +350,60 @@ def char_to_qcode(char: str) -> str | None:
         'a'
         >>> char_to_qcode(' ')
         'spc'
+        >>> char_to_qcode(':')  # Shifted semicolon
+        'semicolon'
     """
-    char = char.lower()
+    # Punctuation mapping (both unshifted and shifted variants)
+    # Shifted punctuation maps to the base key (caller uses char_needs_shift)
+    punct_map = {
+        # Unshifted punctuation
+        "`": "grave_accent",
+        "-": "minus",
+        "=": "equal",
+        "[": "bracket_left",
+        "]": "bracket_right",
+        "\\": "backslash",
+        ";": "semicolon",
+        "'": "apostrophe",
+        ",": "comma",
+        ".": "dot",
+        "/": "slash",
+        # Shifted punctuation -> base key
+        "~": "grave_accent",  # shift + `
+        "!": "1",  # shift + 1
+        "@": "2",  # shift + 2
+        "#": "3",  # shift + 3
+        "$": "4",  # shift + 4
+        "%": "5",  # shift + 5
+        "^": "6",  # shift + 6
+        "&": "7",  # shift + 7
+        "*": "8",  # shift + 8
+        "(": "9",  # shift + 9
+        ")": "0",  # shift + 0
+        "_": "minus",  # shift + -
+        "+": "equal",  # shift + =
+        "{": "bracket_left",  # shift + [
+        "}": "bracket_right",  # shift + ]
+        "|": "backslash",  # shift + \
+        ":": "semicolon",  # shift + ;
+        '"': "apostrophe",  # shift + '
+        "<": "comma",  # shift + ,
+        ">": "dot",  # shift + .
+        "?": "slash",  # shift + /
+    }
+
     if char == " ":
         return "spc"
     elif char == "\n" or char == "\r":
         return "ret"
     elif char == "\t":
         return "tab"
-    elif char.isalnum():
-        return char
+    elif char in punct_map:
+        return punct_map[char]
+    elif char.lower().isalnum():
+        return char.lower()
     else:
-        # Punctuation mapping
-        punct_map = {
-            "`": "grave_accent",
-            "-": "minus",
-            "=": "equal",
-            "[": "bracket_left",
-            "]": "bracket_right",
-            "\\": "backslash",
-            ";": "semicolon",
-            "'": "apostrophe",
-            ",": "comma",
-            ".": "dot",
-            "/": "slash",
-        }
-        return punct_map.get(char)
+        return None
 
 
 def char_needs_shift(char: str) -> bool:
