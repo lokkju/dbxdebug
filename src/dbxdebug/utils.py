@@ -11,7 +11,8 @@ def parse_x86_address(address_str: str | int) -> int:
 
     Supports:
     - Segmented addresses: "XXXX:YYYY" or "0xXXXX:YYYY"
-    - Linear hex: "0x12345" or "12345"
+    - Linear hex: "0x12345" or "12345" -- a bare string with no "0x" prefix
+      is parsed as hexadecimal, not decimal, so "1000" means 0x1000 (4096)
     - Integer passthrough
 
     Args:
@@ -34,13 +35,16 @@ def parse_x86_address(address_str: str | int) -> int:
         # Linear address: segment * 16 + offset
         return (segment << 4) + offset
 
-    # Try to interpret as a normal hex or decimal number
+    # Try to interpret as a hex number. int(..., 16) accepts an optional
+    # "0x"/"0X" prefix on its own, so this covers both "0x1000" and the
+    # bare-digit form "1000" -- both mean hex 0x1000, never decimal 1000.
     try:
-        return int(address_str, 0)
+        return int(address_str, 16)
     except ValueError as e:
         raise ValueError(
             f"Invalid address format: {address_str}. "
-            "Use segment:offset (e.g., b800:0000) or linear address."
+            "Use segment:offset (e.g., b800:0000) or a hex linear address "
+            "(e.g., 0x1000 or 1000, both meaning hex 0x1000)."
         ) from e
 
 

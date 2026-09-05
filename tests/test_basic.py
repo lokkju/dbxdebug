@@ -46,9 +46,11 @@ class TestAddressParsing:
         assert parse_x86_address("0x1000") == 0x1000
         assert parse_x86_address("0xB8000") == 0xB8000
 
-    def test_decimal_address(self):
-        """Parse decimal address."""
-        assert parse_x86_address("4096") == 4096
+    def test_bare_digits_are_parsed_as_hex_not_decimal(self):
+        """A bare digit string with no "0x" prefix means hex, not decimal."""
+        assert parse_x86_address("ff") == 255
+        assert parse_x86_address("1000") == 0x1000
+        assert parse_x86_address("1000") == 4096
 
     def test_invalid_address(self):
         """Invalid address raises ValueError."""

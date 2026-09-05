@@ -180,7 +180,7 @@ class GDBClient:
         """Resolve a caller-supplied address to a validated linear address.
 
         Accepts every format `parse_x86_address` understands -- a bare int,
-        a bare hex/decimal string, or a `"seg:off"` string -- then validates
+        a bare hex string, or a `"seg:off"` string -- then validates
         the result with `addressing.parse_address` to reject values that
         look like a packed far pointer left over from the pre-fix protocol
         convention. `Z0`/`z0`/`m`/`M` all take a linear address, so a caller
