@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "dbxdebug",
+  "version": "0.1.0",
+  "description": "Skills for driving DOS programs under DOSBox-X remote debug, and for working on the GDB/QMP servers themselves.",
+  "author": "lokkju",
+  "homepage": "https://github.com/lokkju/dbxdebug",
+  "repository": "https://github.com/lokkju/dbxdebug",
+  "license": "LicenseRef-Polyform-Shield-1.0.0",
+  "keywords": ["dosbox-x", "dos", "gdb", "qmp", "emulation", "debugging"]
+}
