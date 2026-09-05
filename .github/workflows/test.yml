@@ -1,73 +1,72 @@
-# Test workflow - runs on push/PR to main
-# Builds and uploads artifacts for reuse by publish workflow
-
 name: Test
 
 on:
   push:
-    branches: [main, master]
+    branches: ["**"] # All branches, not tags
   pull_request:
-    branches: [main, master]
-  workflow_call:
-    outputs:
-      artifact-name:
-        description: "Name of uploaded artifact"
-        value: ${{ jobs.build.outputs.artifact-name }}
+    branches: [main]
+  workflow_call: # invoked by release.yml to gate publishing
 
 permissions:
   contents: read
 
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
-    name: Lint
-    uses: ./.github/workflows/lint.yml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Install uv and set up Python
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --locked --dev
+
+      - name: Ruff check
+        run: uv run ruff check src/ tests/
+
+      - name: Ruff format check
+        run: uv run ruff format --check src/ tests/
+
+      - name: Pyright
+        run: uv run pyright src/
 
   test:
-    name: Test (Python ${{ matrix.python-version }})
     needs: lint
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Install uv and set up Python ${{ matrix.python-version }}
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --locked
+        run: uv sync --locked --dev
 
       - name: Run tests
         run: uv run pytest tests -v
 
   build:
-    name: Build
     needs: test
     runs-on: ubuntu-latest
-    outputs:
-      artifact-name: python-package-distributions
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          fetch-depth: 0  # Need full history for hatch-vcs
+          fetch-depth: 0 # Full history for hatch-vcs
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version-file: "pyproject.toml"
-
-      - name: Build package
+      - name: Build (packaging smoke test)
         run: uv build
-
-      - name: Upload distributions
-        uses: actions/upload-artifact@v5
-        with:
-          name: python-package-distributions
-          path: dist/
-          retention-days: 1
