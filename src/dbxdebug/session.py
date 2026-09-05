@@ -27,6 +27,35 @@ This harness cannot work against stock DOSBox-X: it depends on the
 gdbserver and qmpserver remote-debug features, which are additions to this
 project's fork and are not upstream.
 
+The upstream `dosbox_debug.DOSBoxInstance.start()` does not solve this and
+cannot: it opens with `pkill -9 -f dosbox-x`, which kills every *other*
+caller's emulator too, and it keeps the fixed 2159/4444 ports with no
+workdir isolation and no record of what it started. That command is the
+origin of the rule this package follows everywhere instead: **never**
+`pkill -f dosbox-x`. Reap strays through `registry.reap`, which only ever
+touches a process it can identify by pid and `/proc` starttime.
+
+CONCURRENCY, as measured on a 16-core host with
+`probe_concurrency.py --levels 1,2,4,8 --rounds 2`:
+
+    level   sessions   booted   median boot   emulated/wall
+      1         2        2/2       2.12 s        1.0068
+      2         4        4/4       2.12 s        1.0069
+      4         8        8/8       2.14 s        1.0069
+      8        16       16/16      2.25 s        1.0068
+
+Eight sessions at once, every one reaching the DOS prompt, with boot time up
+6% and no throughput cost: there is no single-instance guard, SDL's video
+and audio devices do not serialise instances, and nothing fought over a
+port. What that run does NOT establish, and the distinction matters: those
+guests sat IDLE at the prompt, and an idle DOSBox-X costs almost nothing,
+because it detects the keyboard wait and stops burning host CPU. With a
+program actually running, one instance measured 0.19 host cores -- so 8
+concurrent captures are plausible on 16 cores and are still unmeasured;
+`cycles = max`, which by construction takes what it can get, is unmeasured
+too. Treat 8 as a floor established for launching, not a ceiling
+established for working.
+
 USAGE::
 
     from dbxdebug.session import DosboxSession
@@ -64,11 +93,12 @@ from pathlib import Path
 from typing import IO, Any, TypeVar
 
 from .addressing import linear
-from .gdb import GDBClient
+from .gdb import GDBClient, IncompatibleStubError
 from .qmp import QMPClient
 from .registry import (
     _proc_starttime,
     free_port,
+    kill_group,
     list_sessions,
     port_is_listening,
     registry_dir,
@@ -353,14 +383,29 @@ class DosboxSession:
         if self.install_hooks:
             _install_hooks()
         self._key = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        # Registered into `_LIVE` immediately, before anything is spawned --
+        # not deferred to `_register()`, which only runs after the process
+        # is up, both clients are connected, and `boot_settle` has elapsed.
+        # That window is several seconds long, and a SIGTERM arriving inside
+        # it would otherwise find `_LIVE` empty: `_reap_live()` would have
+        # nothing to stop, the handler would fall through to the previous
+        # (default) disposition, and the owner would die with the emulator
+        # already running but recorded nowhere -- invisible to `stop()` AND
+        # to `registry.reap`, since the on-disk registry file is written
+        # even later than this. `stop()` already tolerates being called
+        # before `proc`/`_registry_path` exist, so registering this early is
+        # safe.
+        with _LIVE_LOCK:
+            _LIVE[self._key] = self
         try:
             self._make_workdir()
         except Exception:
             # Staging can fail (a missing file, an unreadable mount) after
             # the workdir already exists. Nothing has been launched yet, but
-            # the directory is already ours, and an exception is not a
-            # reason to leave one behind.
-            self._cleanup_workdir()
+            # the directory is already ours, and `self` is already in
+            # `_LIVE` -- `stop()` (not just `_cleanup_workdir()`) is what
+            # unwinds both.
+            self.stop()
             raise
         last: Exception | None = None
         # BaseException, not Exception: a KeyboardInterrupt or a socket
@@ -615,6 +660,16 @@ class DosboxSession:
             The connected client.
 
         Raises:
+            IncompatibleStubError: If the stub connects and completes its
+                handshake but does not advertise a required capability
+                (currently only `GDBClient` can raise this). Re-raised
+                immediately, without retrying: a missing capability is a
+                property of the running build, not a transient bind race,
+                and retrying it to a 30s deadline against an older build
+                spends roughly 120 seconds and hundreds of connect/handshake
+                cycles (port_retries + 1 launch attempts, each retrying the
+                connect to its own deadline) only to report a misleading
+                "never accepted a connection" -- the stub accepted every one.
             DosboxLaunchError: If the process exits while connecting, or no
                 attempt succeeds within `connect_timeout`.
         """
@@ -625,6 +680,8 @@ class DosboxSession:
                 raise DosboxLaunchError(f"dosbox-x exited while connecting to {what}")
             try:
                 return factory()
+            except IncompatibleStubError:
+                raise  # permanent: the stub will not grow the capability on retry
             except Exception as exc:  # a refused/slow connect is retried to a deadline
                 last = exc
                 if time.time() > deadline:
@@ -635,7 +692,11 @@ class DosboxSession:
                 time.sleep(0.25)
 
     def _register(self) -> None:
-        """Write this session's registry file and add it to the live-session table."""
+        """Write this session's on-disk registry file.
+
+        The in-memory `_LIVE` registration happens much earlier, at the top
+        of `start()` -- see the comment there for why.
+        """
         assert self.pid is not None
         record = {
             "pid": self.pid,
@@ -660,11 +721,29 @@ class DosboxSession:
         tmp.write_text(json.dumps(record, indent=2))
         tmp.replace(path)  # atomic: a --list never reads a half-written file
         self._registry_path = path
-        with _LIVE_LOCK:
-            _LIVE[self._key] = self
 
     def _kill_process(self) -> None:
-        """SIGTERM then SIGKILL the emulator's process group, and reap it."""
+        """Kill the emulator's process group via `registry.kill_group`, then reap it.
+
+        Delegates the SIGTERM-then-SIGKILL escalation to `kill_group`
+        instead of duplicating it here: a hand-rolled version that only
+        catches `ProcessLookupError` on its first `killpg` lets a
+        `PermissionError` propagate out of `stop()` -- and `stop()` runs
+        from `__exit__`, where a newly raised exception would mask whatever
+        exception the `with` block was already unwinding for. `kill_group`
+        handles that case itself, returning `"denied"` rather than raising.
+        It has no `Popen` handle to reap the zombie with, though, so that
+        part is still done here.
+
+        `pid=proc.pid` is passed through so `kill_group` checks liveness
+        with `_pid_alive` (which treats a zombie as dead) instead of probing
+        the process group with `killpg(pgid, 0)` (which does not: a child
+        we have not yet `wait()`-ed on still answers signal 0 as "alive"
+        even after it has exited). Without `pid=`, `kill_group` would see
+        "alive" for the entire `term_timeout` -- and then the whole second,
+        5s "is it stuck" window on top of that -- every single time, since
+        nothing reaps the zombie until the `proc.wait()` below runs.
+        """
         if self.proc is None:
             return
         proc, self.proc = self.proc, None
@@ -676,26 +755,8 @@ class DosboxSession:
         except ProcessLookupError:
             proc.wait()
             return
-        try:
-            os.killpg(pgid, signal.SIGTERM)
-        except ProcessLookupError:
-            proc.wait()
-            return
-        try:
-            proc.wait(timeout=self.term_timeout)
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(pgid, signal.SIGKILL)
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=5.0)
-        # The group may outlive its leader through a child that ignored
-        # SIGTERM; make the same guarantee for the whole group.
-        try:
-            os.killpg(pgid, 0)
-        except (ProcessLookupError, PermissionError):
-            return
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(pgid, signal.SIGKILL)
+        kill_group(pgid, self.term_timeout, pid=proc.pid)
+        proc.wait()
 
     def _cleanup_workdir(self) -> None:
         """Remove the workdir this session owns, unless told to keep it."""

@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 import dbxdebug.session as session_module
+from dbxdebug.gdb import IncompatibleStubError
 from dbxdebug.registry import _pid_alive, list_sessions, registry_dir
 from dbxdebug.session import DEFAULT_CONF, DosboxSession, render_conf
 
@@ -120,6 +121,57 @@ def test_allocate_ports_skips_ports_claimed_by_a_live_registered_session(monkeyp
     session._allocate_ports()
     assert session.gdb_port not in (55001, 55002)
     assert session.qmp_port not in (55001, 55002)
+
+
+# --------------------------------------------------------------------------
+# _LIVE registration: early enough that a mid-start failure still cleans up
+# --------------------------------------------------------------------------
+
+
+def test_start_registers_into_live_before_spawning_so_a_failure_still_cleans_up():
+    """A failure in `_make_workdir()` must not leave the session in `_LIVE`.
+
+    `_LIVE` is populated at the very top of `start()`, before anything is
+    spawned, so a signal arriving during the several-second window before
+    `_register()` still finds something to stop (see the comment in
+    `start()`). That means an early failure -- staging a nonexistent file,
+    here -- has to route through `stop()` to clear the entry back out,
+    exactly like a later failure does.
+    """
+    session = DosboxSession(files=["/no/such/file"])
+    with pytest.raises(FileNotFoundError):
+        session.start()
+    assert session._key not in session_module._LIVE
+
+
+# --------------------------------------------------------------------------
+# capability mismatch: fail fast, never retry
+# --------------------------------------------------------------------------
+
+
+def test_connect_with_retry_reraises_incompatible_stub_immediately():
+    """An `IncompatibleStubError` is permanent, not a bind race -- it must not be retried.
+
+    Retrying it to `connect_timeout` against an older build costs tens of
+    seconds and hundreds of connect/handshake cycles, then reports a
+    misleading "never accepted a connection" even though the stub answered
+    every single attempt. No emulator needed: a fake factory that always
+    raises is enough to prove the fast path.
+    """
+    calls = 0
+
+    def factory():
+        nonlocal calls
+        calls += 1
+        raise IncompatibleStubError("build lacks dosbox-x-linear-bp+")
+
+    session = DosboxSession(connect_timeout=30.0)
+    start = time.time()
+    with pytest.raises(IncompatibleStubError):
+        session._connect_with_retry(factory, "gdbserver")
+    # No 0.25s retry sleep and no waiting out the 30s deadline: one call, fast.
+    assert time.time() - start < 1.0
+    assert calls == 1
 
 
 # --------------------------------------------------------------------------
