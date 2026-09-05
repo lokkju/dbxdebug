@@ -146,3 +146,19 @@ Enable in DOSBox-X config:
 gdbserver=true
 qmpserver=true
 ```
+
+## Testing
+
+```bash
+uv run pytest                                      # unit tests only; what CI runs
+uv run pytest -m integration tests/integration -v  # live tests against a real emulator
+```
+
+The live tests in `tests/integration/` launch a headless DOSBox-X per test and
+prove the library actually drives one: the vendor GDB capabilities, `eip` as an
+offset rather than a linear address, a breakpoint above 64 KB firing, `memdump`
+agreeing with GDB reads and refusing while the CPU runs, and `frames.steps_out`
+stopping after a real 16-bit `ret`. They are marked `integration` and
+deselected from every default run, because CI has no emulator to launch. The
+binary is located with `dbxdebug.paths.find_dosbox_x` -- set `DBXDEBUG_DOSBOX`
+to choose a specific build -- and the tests skip when none is found.
