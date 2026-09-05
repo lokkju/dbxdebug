@@ -758,6 +758,32 @@ class GDBClient:
         self._send_packet(b"?")
         return self._read_packet()
 
+    def resume(self) -> None:
+        """Let the CPU run again, without waiting for the next stop.
+
+        `continue_execution` sends the same `c` packet and then BLOCKS until
+        a stop reply comes back, which is right for "run to the next
+        breakpoint" and wrong for "put the guest back the way I found it".
+        With no breakpoint armed nothing ever answers, so that call burns
+        the socket's whole timeout and then raises.
+
+        The stub really does owe nothing here: DOSBox-X's `c` handler clears
+        its paused flag and returns without sending a packet, so the only
+        reply that can ever follow is the stop reply for a LATER stop --
+        which by then is unsolicited, and is queued in `pending_stops` where
+        it belongs. This method records that by clearing `_owed_reply` after
+        the send, so the next request does not try to drain a reply that is
+        not coming (which would time out and mark this client unusable).
+
+        Use `continue_execution` when the point IS to wait for the stop.
+        """
+        self._send_packet(b"c")
+        # Deliberately after the send: `_send_packet` sets `_owed_reply`
+        # before awaiting the ACK precisely so that a timeout in there
+        # leaves an accurate record. Only once the ACK is in hand is it
+        # true that the stub owes nothing further.
+        self._owed_reply = False
+
     def close(self) -> None:
         """Close the connection."""
         if self.sock:

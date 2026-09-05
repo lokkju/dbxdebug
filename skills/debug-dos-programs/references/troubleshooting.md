@@ -126,9 +126,11 @@ stopped CPU.
 
 **Fix.**
 
-- Stop the CPU with `gdb.halt()` when you also intend to talk GDB. Reserve
-  `qmp.stop()` for QMP-only work — `memdump` itself works fine while
-  QMP-stopped.
+- To read a region, call `session.read_bulk(address, length)`: it halts
+  through GDB, dumps, and puts the run state back, so this combination cannot
+  arise. Otherwise stop the CPU with `gdb.halt()` when you also intend to talk
+  GDB, and resume it with `gdb.resume()`. Reserve `qmp.stop()` for QMP-only
+  work — `memdump` itself works fine while QMP-stopped.
 - Set your own bound if 30 s is wrong for your workload:
   `GDBClient(timeout=...)`, or `session.gdb.sock.settimeout(...)` after
   `start()`. Nothing is cached; every read consults the socket's own value.
@@ -291,17 +293,21 @@ Grep for `["eip"]` and `read_register(8)` as well.
 
 ---
 
-## "`memdump` failed with a QMPError about being stopped"
+## "`CpuNotStoppedError` — memdump refused because the CPU is running"
 
 **Cause.** `memdump` reads guest memory directly off the QMP socket thread —
 it is the one handler that does not defer to the emulation thread — so
 DOSBox-X refuses it outright while the guest is running rather than risk a
-torn read.
+torn read. `CpuNotStoppedError` subclasses `QMPError`, so anything already
+catching the raw protocol error still catches it; the message carries the
+stub's own words plus what to do.
 
-**Fix.** Stop the CPU first. Use `gdb.halt()` if you also intend to talk GDB;
-`qmp.stop()` works too but then any GDB request goes unanswered and raises
-`GDBTimeoutError` (see that entry). `system_reset` carries the mirror-image
-guard: it refuses while
+**Fix.** Call `session.read_bulk(address, length)` instead of driving
+`qmp.memdump` by hand — it halts through GDB, dumps, and restores the run
+state, and cannot reach this error. Halting yourself works too: `gdb.halt()`,
+dump, `gdb.resume()`. `qmp.stop()` also makes the dump legal and is a trap —
+every GDB request after it goes unanswered and raises `GDBTimeoutError` (see
+that entry). `system_reset` carries the mirror-image guard: it refuses while
 GDB-halted, and allows a plain QMP `stop`.
 
 ---

@@ -28,6 +28,46 @@ class QMPError(Exception):
     pass
 
 
+class CpuNotStoppedError(QMPError):
+    """Raised when `memdump` is refused because the guest CPU is still running.
+
+    A subclass of `QMPError`, not a new hierarchy: callers (and tests) that
+    already catch the raw protocol error keep catching this, and the stub's
+    own wording is preserved verbatim inside the message for the same
+    reason.
+
+    It exists because the raw refusal names two remedies and one of them is
+    a trap. The stub says "halt via GDB or QMP stop first", but a QMP `stop`
+    parks the emulation thread, and the GDB stub is polled FROM that thread.
+    After `qmp.stop()` the dump does work -- and every GDB request goes
+    unanswered until `qmp.cont()`. Only the GDB halt leaves both clients
+    usable, which is what `CPU_NOT_STOPPED_REMEDY` spells out.
+    """
+
+
+# Substring of the stub's refusal that identifies "the CPU is still
+# running". Matched case-insensitively, so a reworded stub that keeps the
+# phrase still routes here; if it ever stops matching, the caller gets a
+# plain `QMPError` carrying the stub's text, which is exactly the
+# pre-existing behaviour rather than a new failure.
+CPU_NOT_STOPPED_MARKER = "cpu to be stopped"
+
+# What to do instead, appended to the stub's own refusal. The stub cannot
+# say this itself: it does not know which of its clients is asking, and from
+# the emulator's side a QMP `stop` really is a valid way to quiesce memory.
+# It is only wrong for a caller that also intends to keep talking GDB --
+# which is every caller of this package, since `memdump` is reached through
+# a session that holds both clients.
+CPU_NOT_STOPPED_REMEDY = (
+    "Halt through GDB before dumping -- `gdb.halt()` then `qmp.memdump(...)` -- "
+    "or call `DosboxSession.read_bulk(address, length)`, which halts, dumps and "
+    "restores the previous run state in one call. Do NOT reach for `qmp.stop()`: "
+    "it parks the emulation thread, and the GDB stub is polled from that thread, "
+    "so the dump would succeed while every later GDB request goes unanswered "
+    "until `qmp.cont()`."
+)
+
+
 class QMPClient:
     """QEMU Monitor Protocol client for DOSBox-X keyboard input."""
 
@@ -251,9 +291,13 @@ class QMPClient:
         halt, the interactive debugger, or a QMP `stop` -- before it will
         run. It reads guest memory directly, off the socket thread, and
         would race the emulation thread otherwise; DOSBox-X refuses the
-        request rather than risk a torn read. A caller who does not know
-        this will see a confusing `QMPError` about the CPU not being
-        stopped, so stop the CPU first.
+        request rather than risk a torn read.
+
+        Of the three ways to stop it, only the GDB halt leaves the rest of
+        the debug surface usable: `qmp.stop()` parks the emulation thread,
+        and the GDB stub is polled from that thread, so the dump succeeds
+        and every GDB request after it goes unanswered. `DosboxSession.read_bulk`
+        exists so a caller need not remember any of this.
 
         Args:
             address: Linear guest address to start reading from
@@ -265,12 +309,19 @@ class QMPClient:
             The dumped bytes, or the server-side file path if `file` was given
 
         Raises:
-            QMPError: If the CPU is not stopped, or the dump otherwise fails
+            CpuNotStoppedError: If the CPU is still running. Carries the
+                stub's own refusal plus the fix, and subclasses `QMPError`.
+            QMPError: If the dump fails for any other reason
         """
         arguments: dict = {"address": address, "size": size}
         if file is not None:
             arguments["file"] = file
-        response = self._send_command("memdump", arguments)
+        try:
+            response = self._send_command("memdump", arguments)
+        except QMPError as exc:
+            if CPU_NOT_STOPPED_MARKER in str(exc).lower():
+                raise CpuNotStoppedError(f"{exc}. {CPU_NOT_STOPPED_REMEDY}") from exc
+            raise
         result = response.get("return", {})
         if "file" in result:
             return result["file"]

@@ -187,26 +187,41 @@ breakpoint refusal reaches you as `Z0` answering `E01` instead of `OK`.
 
 ---
 
-## 5. Bulk reads go through QMP `memdump`, not a loop of GDB `m` packets
+## 5. Bulk reads go through `session.read_bulk`, not a loop of GDB `m` packets
 
 One `memdump` call reads a whole range server-side and returns it in a single
 reply. A recorded segment scan in a downstream consumer cost **7,168 GDB
 round-trips** before this was understood — one per small chunk.
 
+**Use `session.read_bulk(address, length)`.** It holds the whole sequence:
+
 ```python
-gdb.halt()                                # REQUIRED, see below
-data = qmp.memdump(0xFFEF0, 0x110)        # -> bytes
+data = session.read_bulk(0xF0000, 0x10000)   # -> 65536 bytes
 ```
+
+Measured on this build, one 64 KB segment: **0.124 s** through `read_bulk` —
+status query, halt and resume included — against **5.25 s** for the same bytes
+through 64 one-kilobyte `gdb.read_memory` calls. 42x, and it widens with the
+region, because a GDB round-trip costs about **82 ms** here whatever its size.
+Both paths return identical bytes.
+
+`read_bulk` halts through GDB, dumps, and resumes. If the CPU was **already**
+stopped — a breakpoint, the interactive debugger, or a QMP stop — it takes the
+dump and leaves it stopped: it resumes only what it halted itself.
+
+The two rules it exists to hold, if you drive `qmp.memdump` yourself:
 
 **`memdump` requires the CPU to be stopped.** It reads guest memory directly
 off the QMP socket thread, so DOSBox-X refuses the request outright rather
-than risk a torn read against the running emulation thread. You will see a
-`QMPError` mentioning "stopped".
+than risk a torn read against the running emulation thread. The refusal
+reaches you as `CpuNotStoppedError` (a `QMPError` subclass) naming the fix.
 
 **Stop it with `gdb.halt()`, not `qmp.stop()`,** if you also intend to talk
 GDB. While the emulator is QMP-stopped the GDB stub does not answer at all —
 it is polled from the emulation thread — so `qmp.stop()` followed by any GDB
-request is a deadlock against a client that has no read timeout (§7).
+request cannot be served (§7). Resume with `gdb.resume()`, not
+`continue_execution()`: the latter blocks until the next stop reply, which
+never comes if nothing is armed to stop it.
 
 Without a `file=` argument the server base64-encodes the dump inline, capped
 at 16 MB server-side. With `file=`, the dump is written on the machine running
@@ -253,7 +268,9 @@ timeout on every read, not just the connect, and raises `GDBTimeoutError` — a
 with `GDBClient(timeout=...)`; `timeout=None` restores unbounded blocking. The
 interaction that made this easy to hit is unchanged: while the emulator is
 QMP-stopped the GDB stub is not serviced, so `qmp.stop()` followed by a GDB
-request cannot be answered. Use `gdb.halt()` when you also intend to talk GDB.
+request cannot be answered. To read a region use `session.read_bulk` (§5),
+which never leaves the emulator in that state; otherwise use `gdb.halt()` /
+`gdb.resume()` when you also intend to talk GDB.
 
 **A disturbed stream resynchronises, or refuses** (lokkju/dbxdebug#5, fixed).
 An unrequested stop reply goes to `gdb.pending_stops` instead of being read as
