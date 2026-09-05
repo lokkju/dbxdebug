@@ -7,6 +7,12 @@ breakpoint above 64 KB really fires, that `memdump` really refuses while the
 CPU runs, and that `frames.steps_out` really stops after a 16-bit epilogue's
 `ret` rather than on it.
 
+Three of them are about the wire itself. `GDBClient` assumes strict
+request/response and never resynchronises, so the last three tests pin down
+where that assumption holds and, for the two known ways it breaks, what the
+client does TODAY -- which is not what it should do. See their docstrings,
+and lokkju/dbxdebug#4 and #5.
+
 Every test gets its OWN emulator, launched and torn down by the fixtures in
 `conftest.py`. They are marked `integration` and are excluded from the
 default `pytest` run (see `addopts` in `pyproject.toml`), because CI has no
@@ -108,6 +114,50 @@ FRAME_AFTER_CALL_OFFSET = 0x10D
 # staged program and stamped its CS.
 FRAME_STAMP_TIMEOUT = 40.0
 
+# Where a .COM image is loaded within its segment, and enough of FRAME.COM's
+# opening bytes to identify it there. The CS stamp alone does not prove the
+# segment it names holds FRAME.COM -- see the check that uses these.
+COM_LOAD_OFFSET = 0x100
+FRAME_COM_SIGNATURE = FRAME_COM[:10]
+
+# A .COM that terminates the instant it starts: at the .COM entry offset a
+# lone `ret` returns to PSP:0000, which holds the INT 20h that DOS puts
+# there. Driven by the batch file below, the guest performs a DOS program
+# launch several times a second with no keystroke from the host -- which is
+# what an armed break-on-exec needs in order to fire.
+EXIT_COM = bytes([0xC3])
+EXIT_COM_NAME = "EXITNOW.COM"
+EXEC_LOOP_NAME = "EXECLOOP.BAT"
+EXEC_LOOP_BAT = ":top\r\nEXITNOW\r\ngoto top\r\n"
+
+# Wall seconds to wait for an armed break-on-exec to actually stop the CPU.
+BREAK_ON_EXEC_TIMEOUT = 30.0
+
+# Wall seconds allowed for the prompt to appear, and the bound the observed
+# time is checked against.
+PROMPT_TIMEOUT = 40.0
+
+# A second, differently sized read used as the "did this reply belong to
+# this request" probe for the stream-shift test: the BIOS data area, whose
+# first eight bytes are the four COM port base addresses.
+BDA_ADDRESS = 0x400
+BDA_LENGTH = 8
+
+# A socket timeout no localhost round-trip can meet, used to abandon a reply
+# on purpose. Not zero -- zero would put the socket in non-blocking mode.
+IMPOSSIBLE_SOCKET_TIMEOUT = 0.0005
+
+# `DosboxSession.boot_settle` defaults to 2.5s so that a caller reading the
+# guest's SCREEN right after `start()` cannot capture the DOSBox-X boot
+# banner. A test asserting only on ROM, registers, capabilities, QMP status
+# or host process state depends on nothing the guest's boot progress can
+# change, so it skips that wait. Every test that does need a booted DOS --
+# a `C:\>` prompt, a staged program, a DOS EXEC, or the BIOS-populated IVT --
+# keeps the default deliberately: shaving the wait there would turn a slow
+# boot into a flaky assertion, or into a 30s socket timeout on a breakpoint
+# set from a vector that was not written yet.
+NO_BOOT_SETTLE = 0.0
+
 
 def clients(session: DosboxSession) -> tuple[GDBClient, QMPClient]:
     """Return a started session's two debug clients, asserting both connected.
@@ -140,7 +190,7 @@ def test_session_starts_and_both_clients_connect(
     make_session: Callable[..., DosboxSession],
 ) -> None:
     """A session comes up with a live process and both debug clients attached."""
-    session = make_session()
+    session = make_session(boot_settle=NO_BOOT_SETTLE)
     gdb, qmp = clients(session)
 
     assert session.running
@@ -154,7 +204,7 @@ def test_stub_advertises_both_vendor_capabilities(
     make_session: Callable[..., DosboxSession],
 ) -> None:
     """The stub advertises linear breakpoints AND offset-style `eip`."""
-    gdb, _ = clients(make_session())
+    gdb, _ = clients(make_session(boot_settle=NO_BOOT_SETTLE))
 
     assert LINEAR_BP_CAPABILITY in gdb.capabilities
     assert EIP_OFFSET_CAPABILITY in gdb.capabilities
@@ -169,7 +219,7 @@ def test_eip_is_an_offset_within_cs_not_a_linear_address(
     older stub returned `SegPhys(cs) + reg_eip` from `g`, which would make
     `eip` alone exceed a 16-bit offset and make the identity below fail.
     """
-    gdb, _ = clients(make_session())
+    gdb, _ = clients(make_session(boot_settle=NO_BOOT_SETTLE))
     # Halt first: a free-running CPU would move between the two reads and
     # the comparison would be meaningless (or flaky, which is worse).
     gdb.halt()
@@ -209,7 +259,7 @@ def test_memdump_matches_gdb_read_byte_for_byte(
     make_session: Callable[..., DosboxSession],
 ) -> None:
     """The bulk QMP read and the GDB `m` read return the same bytes."""
-    session = make_session()
+    session = make_session(boot_settle=NO_BOOT_SETTLE)
     gdb, qmp = clients(session)
     gdb.halt()
 
@@ -230,7 +280,7 @@ def test_memdump_refuses_while_the_cpu_is_running(
     requires the CPU stopped -- GDB-halted or QMP-stopped -- rather than
     racing the emulation thread.
     """
-    session = make_session()
+    session = make_session(boot_settle=NO_BOOT_SETTLE)
     _, qmp = clients(session)
     assert qmp.query_status()["running"] is True
 
@@ -244,17 +294,20 @@ def test_wait_for_text_observes_the_prompt(make_session: Callable[..., DosboxSes
     """`wait_for_text` returns an observed time, not None."""
     session = make_session()
 
-    observed = session.wait_for_text(DOS_PROMPT, timeout=40.0)
+    observed = session.wait_for_text(DOS_PROMPT, timeout=PROMPT_TIMEOUT)
 
     assert observed is not None, "the guest never reached a C:\\> prompt"
-    assert observed >= 0.0
+    # A real bound, unlike `observed >= 0.0`, which a rounded elapsed time
+    # cannot fail: `wait_for_text` only returns a time from inside its own
+    # deadline, so anything above the timeout means it measured wrongly.
+    assert observed <= PROMPT_TIMEOUT
 
 
 def test_context_exit_kills_the_process_and_removes_the_workdir(
     session_builder: Callable[..., DosboxSession],
 ) -> None:
     """Leaving the `with` block leaves no process and no scratch directory."""
-    session = session_builder()
+    session = session_builder(boot_settle=NO_BOOT_SETTLE)
     with session:
         assert session.running
         assert session.pid is not None
@@ -271,25 +324,28 @@ def test_context_exit_kills_the_process_and_removes_the_workdir(
     assert not workdir.exists()
 
 
-def test_no_packet_desync_after_a_burst_of_packets(
+def test_strictly_serialised_requests_each_get_their_own_reply(
     make_session: Callable[..., DosboxSession],
 ) -> None:
-    """A read issued right after a burst of packets returns ITS OWN reply.
+    """Every reply matches its request while nothing else touches the stream.
 
-    A downstream probe (`probe_frame_unwind.py`) reads the same word up to
-    four times "until two consecutive reads agree", on the observation that
-    a single `m` right after a run of packets came back carrying the
-    PREVIOUS response's payload. `frames.py` deliberately does not
-    replicate that workaround, on the grounds that it would hide a genuine
-    protocol desync instead of surfacing it -- so this is the test that
-    would surface one.
+    WHAT THIS COVERS: bursts of `m`/`g`/`p` packets against a free-running
+    CPU, and continue/stop cycles with register and memory reads after each
+    stop -- all issued strictly one at a time, each reply read before the
+    next request is sent, with no breakpoint able to fire unrequested. Every
+    probe reads the ROM reset vector, whose bytes are fixed, so a stale or
+    shifted payload is DETECTABLE rather than merely inconsistent.
 
-    Both shapes the observation could have had are exercised: a burst
-    against a free-running CPU, and the probe's own shape, a
-    continue/stop cycle followed by register and memory reads. The probe
-    read a stack word whose correct value it could not know; this reads the
-    ROM reset vector, whose bytes are fixed, so a stale or shifted payload
-    is DETECTABLE rather than merely inconsistent.
+    WHAT THIS DOES NOT COVER, despite an earlier version of this test
+    claiming it did: the historically recorded symptom that `frames.py`
+    describes, where "a single `m` right after a run of packets came back
+    with the previous response's payload". Producing that needs something to
+    put an extra packet on the wire, or to abandon a reply that has already
+    been requested; strict serialisation does neither, so passing here is no
+    evidence at all that the symptom is gone. The two known ways to produce
+    it each have their own test below. This one is the control: it shows the
+    framing is correct when nothing disturbs the stream, which is what makes
+    those two tests interpretable.
     """
     session = make_session()
     gdb, _ = clients(session)
@@ -322,8 +378,8 @@ def test_no_packet_desync_after_a_burst_of_packets(
         gdb.read_memory(linear(ss, bp), 6)
         gdb.read_register(8)
         gdb.read_memory(0xB8000, 320)
-        gdb.set_breakpoint(BIOS_RESET_VECTOR)
-        gdb.remove_breakpoint(BIOS_RESET_VECTOR)
+        assert gdb.set_breakpoint(BIOS_RESET_VECTOR)
+        assert gdb.remove_breakpoint(BIOS_RESET_VECTOR)
         probe = gdb.read_memory(BIOS_RESET_VECTOR, len(BIOS_RESET_BYTES))
         if probe != BIOS_RESET_BYTES:
             mismatches.append(("stopped", iteration, probe.hex()))
@@ -361,6 +417,16 @@ def test_steps_out_returns_past_a_real_16_bit_ret(
         if not cs:
             time.sleep(0.2)
     assert cs, f"{FRAME_COM_NAME} never ran: no CS stamp at {FRAME_STAMP_ADDRESS:#x}"
+    # The stamp says only "some word at 0x500 is non-zero". Confirm the
+    # segment it names really holds FRAME.COM: without this, anything that
+    # ever leaves a stray word there would send the breakpoint below to a
+    # garbage address, and the wrong value would surface as a 30s socket
+    # timeout instead of as a failed assertion.
+    loaded = gdb.read_memory(linear(cs, COM_LOAD_OFFSET), len(FRAME_COM_SIGNATURE))
+    assert loaded == FRAME_COM_SIGNATURE, (
+        f"the word at {FRAME_STAMP_ADDRESS:#x} is {cs:#06x}, but "
+        f"{cs:04X}:{COM_LOAD_OFFSET:04X} does not hold {FRAME_COM_NAME}"
+    )
 
     gdb.halt()
     body = linear(cs, FRAME_BODY_OFFSET)
@@ -383,3 +449,90 @@ def test_steps_out_returns_past_a_real_16_bit_ret(
     after = gdb.read_registers()
     assert gdb.linear_pc() == linear(cs, FRAME_AFTER_CALL_OFFSET)
     assert (after["esp"] & 0xFFFF) == frame_bp + 4, "SP did not clear the return-address slot"
+
+
+def test_unsolicited_stop_reply_from_break_on_exec_desyncs_the_client(
+    make_session: Callable[..., DosboxSession], tmp_path: Path
+) -> None:
+    """Arming QMP break-on-exec while free-running breaks the GDB connection.
+
+    `DEBUG_CheckExecuteBreakpoint` arms AND immediately activates a
+    breakpoint at the next program's entry point, regardless of whether the
+    GDB client asked to continue. When it hits, the stub sends a `$S05#b8`
+    that nothing requested. `GDBClient` assumes strict request/response, so
+    its next `_send_packet` reads that `$` where it expects the `+` ACK for
+    its own packet, and raises.
+
+    THIS ASSERTS A DEFECT, NOT A CONTRACT. Documenting today's behaviour is
+    the point: the client should resynchronise instead (lokkju/dbxdebug#4,
+    with #5 for the timeout half of the same gap). When that lands, this
+    test starts failing loudly -- rewrite it then to assert the recovery, do
+    not re-pin it to whatever the fixed client happens to raise.
+    """
+    drive = tmp_path / "c"
+    drive.mkdir()
+    (drive / EXIT_COM_NAME).write_bytes(EXIT_COM)
+    (drive / EXEC_LOOP_NAME).write_text(EXEC_LOOP_BAT, newline="")
+    session = make_session(
+        mounts={"c": drive},
+        autoexec=[f"mount c {drive}", "c:", EXEC_LOOP_NAME],
+    )
+    gdb, qmp = clients(session)
+    assert qmp.query_status()["running"] is True
+    assert gdb.read_memory(BIOS_RESET_VECTOR, len(BIOS_RESET_BYTES)) == BIOS_RESET_BYTES
+
+    qmp.debug_break_on_exec(True)
+
+    # Wait for the break to actually fire before touching GDB at all, so the
+    # unsolicited reply is already buffered when the client next speaks --
+    # rather than racing it mid-exchange, where the same defect surfaces as
+    # an undecodable payload instead. QMP is a separate connection, so
+    # polling it does not disturb the GDB stream.
+    deadline = time.time() + BREAK_ON_EXEC_TIMEOUT
+    while time.time() < deadline and qmp.query_status()["running"]:
+        time.sleep(0.2)
+    assert qmp.query_status()["running"] is False, (
+        f"break-on-exec never stopped the CPU within {BREAK_ON_EXEC_TIMEOUT}s; "
+        f"the guest's {EXEC_LOOP_NAME} loop may not be running"
+    )
+
+    with pytest.raises(ConnectionError):
+        gdb.read_memory(BIOS_RESET_VECTOR, len(BIOS_RESET_BYTES))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="GDBClient never resynchronises after a timed-out request: the "
+    "abandoned reply is handed to the next request instead. lokkju/dbxdebug#5",
+)
+def test_a_timed_out_request_does_not_shift_every_later_reply(
+    make_session: Callable[..., DosboxSession],
+) -> None:
+    """A request that times out must not leave every later reply one packet late.
+
+    This is the second, quieter way to reproduce the symptom `frames.py`
+    records. The socket timeout is squeezed below any possible round-trip,
+    so the reply to the 16-byte ROM read is abandoned unread. The next
+    request sends its own packet, consumes the ABANDONED request's ACK, and
+    reads the ABANDONED request's payload: 16 bytes of ROM where 8 bytes of
+    BIOS data area were asked for. Nothing ever puts the stream back, and
+    nothing reports it -- the caller just gets someone else's bytes.
+
+    Expected to FAIL today, hence `xfail(strict=True)`: when the client
+    learns to resynchronise this becomes an XPASS, which strict mode reports
+    as a failure. That is the signal to delete the marker, not to relax it.
+    """
+    gdb, _ = clients(make_session(boot_settle=NO_BOOT_SETTLE))
+    assert gdb.sock is not None
+    original_timeout = gdb.sock.gettimeout()
+
+    baseline = gdb.read_memory(BDA_ADDRESS, BDA_LENGTH)
+    assert len(baseline) == BDA_LENGTH
+    assert gdb.read_memory(BIOS_RESET_VECTOR, len(BIOS_RESET_BYTES)) == BIOS_RESET_BYTES
+
+    gdb.sock.settimeout(IMPOSSIBLE_SOCKET_TIMEOUT)
+    with pytest.raises(TimeoutError):
+        gdb.read_memory(BIOS_RESET_VECTOR, len(BIOS_RESET_BYTES))
+    gdb.sock.settimeout(original_timeout)
+
+    assert gdb.read_memory(BDA_ADDRESS, BDA_LENGTH) == baseline

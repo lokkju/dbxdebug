@@ -259,6 +259,11 @@ def test_kill_process_sweeps_a_child_that_outlives_its_leader(tmp_path):
 # --------------------------------------------------------------------------
 
 
+# Marked `integration` as well as guarded by `requires_emulator`: the marker
+# means "launches a real emulator", not "lives in tests/integration", and
+# this test launches one. Without it a plain `uv run pytest` on a developer
+# machine boots DOSBox-X, which is exactly what the marker exists to avoid.
+@pytest.mark.integration
 @requires_emulator
 def test_session_starts_connects_and_tears_down_idempotently():
     # No explicit `workdir=`: the session must allocate and own its own

@@ -49,9 +49,11 @@ packages = ["src/dbxdebug"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Integration tests launch a real DOSBox-X, so they are excluded from every
-# default run -- including CI's `uv run pytest tests -v`, which has no
-# emulator to launch. Opt in with `uv run pytest -m integration tests/integration`.
+# Tests that launch a real DOSBox-X are excluded from every default run --
+# including CI's `uv run pytest tests -v`, which has no emulator to launch,
+# and a plain `uv run pytest` on a developer machine, which has one and must
+# not start it unasked. Opt in with `uv run pytest -m integration tests`;
+# most (but not all) of those tests live in tests/integration.
 addopts = "-m 'not integration'"
 markers = [
     "integration: launches a real DOSBox-X emulator; deselected unless `-m integration` is given",

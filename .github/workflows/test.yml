@@ -35,7 +35,10 @@ jobs:
         run: uv run ruff format --check src/ tests/
 
       - name: Pyright
-        run: uv run pyright src/
+        # No path argument on purpose: that makes pyright use [tool.pyright]
+        # `include` from pyproject.toml, so CI can never check fewer paths
+        # than the config claims to cover (it once skipped tests/ entirely).
+        run: uv run pyright
 
   test:
     needs: lint
