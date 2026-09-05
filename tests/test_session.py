@@ -13,12 +13,12 @@ end to end -- Task 11 adds the thorough live suite.
 import json
 import os
 import time
-from pathlib import Path
 
 import pytest
 
 import dbxdebug.session as session_module
 from dbxdebug.gdb import IncompatibleStubError
+from dbxdebug.paths import find_dosbox_x
 from dbxdebug.registry import _pid_alive, list_sessions, registry_dir
 from dbxdebug.session import DEFAULT_CONF, DosboxSession, render_conf
 
@@ -30,19 +30,12 @@ def _isolated_registry(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _dosbox_x_path() -> Path:
-    """Resolve the emulator path the same way `session.py` does."""
-    return Path(
-        os.environ.get(
-            "DBXDEBUG_DOSBOX",
-            str(Path.home() / "projects/eesystem/dosbox-x/src/dosbox-x"),
-        )
-    )
-
+_found_dosbox_x = find_dosbox_x()
 
 requires_emulator = pytest.mark.skipif(
-    not _dosbox_x_path().exists(),
-    reason=f"no DOSBox-X binary at {_dosbox_x_path()} (set DBXDEBUG_DOSBOX to override)",
+    _found_dosbox_x is None,
+    reason="no DOSBox-X binary found (checked $DBXDEBUG_DOSBOX, the conventional "
+    "path, and $PATH; set DBXDEBUG_DOSBOX to override)",
 )
 
 

@@ -94,6 +94,7 @@ from typing import IO, Any, TypeVar
 
 from .addressing import linear
 from .gdb import GDBClient, IncompatibleStubError
+from .paths import DOSBOX_X_ENV_VAR, configured_dosbox_x_path
 from .qmp import QMPClient
 from .registry import (
     _proc_starttime,
@@ -103,22 +104,6 @@ from .registry import (
     port_is_listening,
     registry_dir,
 )
-
-# The emulator to launch. Overridable via DBXDEBUG_DOSBOX so a test (or a
-# checkout that keeps the fork somewhere else) can point this at a different
-# binary without touching a call site.
-_DEFAULT_DOSBOX_X = str(Path.home() / "projects/eesystem/dosbox-x/src/dosbox-x")
-
-
-def _default_executable() -> Path:
-    """Resolve the emulator path from DBXDEBUG_DOSBOX, read fresh each call.
-
-    Returns:
-        The configured emulator path, so a test can `monkeypatch.setenv`
-        this without caring when `session` was imported.
-    """
-    return Path(os.environ.get("DBXDEBUG_DOSBOX", _DEFAULT_DOSBOX_X))
-
 
 # `[sdl] output`. NOT `opengl`: measured back to back on an idle host,
 # `opengl` accumulates emulated time roughly 8.6x more slowly than `surface`
@@ -282,7 +267,7 @@ class DosboxSession:
     autoexec: str | Iterable[str] | None = None
     cycles: str = "max"
     sdl_output: str = DEFAULT_SDL_OUTPUT
-    executable: str | Path = field(default_factory=_default_executable)
+    executable: str | Path = field(default_factory=configured_dosbox_x_path)
     env: Mapping[str, str] | None = None
     connect: bool = True
     # Whether the conf turns DOSBox-X's gdbserver on. `False` means no
@@ -407,6 +392,20 @@ class DosboxSession:
             # unwinds both.
             self.stop()
             raise
+        exe = Path(self.executable)
+        if not exe.is_file():
+            # Fail once, clearly, before burning port_retries+1 attempts on
+            # a failure mode that will not change between attempts. This is
+            # also where an explicit-but-wrong DBXDEBUG_DOSBOX surfaces: it
+            # is trusted as-is by `configured_dosbox_x_path()` rather than
+            # silently replaced by a PATH binary, so the failure has to
+            # happen here instead.
+            self.stop()
+            raise DosboxLaunchError(
+                f"dosbox-x executable not found: {exe} "
+                f"(set {DOSBOX_X_ENV_VAR}, place a build at the conventional "
+                "path, or add dosbox-x to PATH)"
+            )
         last: Exception | None = None
         # BaseException, not Exception: a KeyboardInterrupt or a socket
         # error from the port allocator is just as capable of leaving a

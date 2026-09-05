@@ -12,16 +12,23 @@ only checks whether attempting one is likely to succeed.
 from __future__ import annotations
 
 import os
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .paths import DEFAULT_DOSBOX_X_PATH, find_dosbox_x
 from .registry import RegisteredSession, list_sessions, registry_dir
 
-# Overridable via DBXDEBUG_DOSBOX, the same variable session.py reads --
-# kept in sync here so `doctor` reports on the exact binary a real launch
-# would use.
-_DEFAULT_DOSBOX_X = str(Path.home() / "projects/eesystem/dosbox-x/src/dosbox-x")
+# Re-exported so existing callers of `doctor.find_dosbox_x()` keep working
+# unchanged -- the actual resolution order lives in `paths.py`, the single
+# place both `doctor` and `session` read it from, so the two can never
+# disagree about where `dosbox-x` is again.
+__all__ = [
+    "DoctorReport",
+    "find_dosbox_x",
+    "has_remote_debug",
+    "registry_is_writable",
+    "run",
+]
 
 # Strings this project's DOSBox-X fork embeds for its added gdbserver and
 # qmpserver remote-debug servers (see `dosbox.cpp`'s `[dosbox]` section
@@ -33,30 +40,6 @@ _REMOTE_DEBUG_MARKERS = (b"gdbserver port", b"qmpserver port")
 # Name a probe file so a writability check never collides with a real
 # registry entry (those are all named after a session's launch details).
 _WRITE_PROBE_NAME = ".dbxdebug-doctor-write-probe"
-
-
-def find_dosbox_x() -> Path | None:
-    """Locate a `dosbox-x` binary the way `session.py` would launch it.
-
-    Checked in order: the `DBXDEBUG_DOSBOX` environment variable, the
-    conventional checkout path `~/projects/eesystem/dosbox-x/src/dosbox-x`,
-    then `PATH`.
-
-    Returns:
-        The resolved path if a candidate file exists, else None. When
-        `DBXDEBUG_DOSBOX` is set but names a file that does not exist, that
-        explicit override is trusted and the search stops there rather
-        than silently falling through to a different binary.
-    """
-    env_path = os.environ.get("DBXDEBUG_DOSBOX")
-    if env_path:
-        candidate = Path(env_path)
-        return candidate if candidate.is_file() else None
-    conventional = Path(_DEFAULT_DOSBOX_X)
-    if conventional.is_file():
-        return conventional
-    found = shutil.which("dosbox-x")
-    return Path(found) if found else None
 
 
 def has_remote_debug(binary: Path) -> bool | None:
@@ -148,7 +131,7 @@ class DoctorReport:
         else:
             lines.append(
                 "[fail] dosbox-x binary: not found (checked $DBXDEBUG_DOSBOX, "
-                f"{_DEFAULT_DOSBOX_X}, and $PATH)"
+                f"{DEFAULT_DOSBOX_X_PATH}, and $PATH)"
             )
 
         if self.cpu_count:
