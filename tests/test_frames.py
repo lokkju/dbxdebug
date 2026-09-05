@@ -127,22 +127,39 @@ def test_walk_frames_masks_registers_to_sixteen_bits():
 
 
 def test_walk_frames_terminates_on_a_self_referential_bp():
-    """A frame whose saved BP points at itself must not loop forever."""
+    """A one-frame cycle ends at the strict-monotonicity rule, not a cycle guard.
+
+    `walk_frames` keeps no set of visited BPs. A saved BP pointing back at
+    the frame that holds it is not strictly greater than the current BP, so
+    `saved_bp <= bp` ends the walk with the single frame already collected.
+    """
     memory = {linear(SS, 0x1000): frame_bytes(0x1000, 0xAAAA, 0x1111)}
     gdb = FakeGDB({"ebp": 0x1000, "ss": SS}, memory)
 
-    assert walk_frames(gdb) == [Frame(bp=0x1000, return_off=0xAAAA, return_seg=0x1111, depth=0)]
+    walked = walk_frames(gdb)
+
+    assert len(walked) == 1
+    assert walked == [Frame(bp=0x1000, return_off=0xAAAA, return_seg=0x1111, depth=0)]
 
 
 def test_walk_frames_terminates_on_an_a_to_b_to_a_cycle():
-    """A two-frame cycle must terminate with the frames seen before the loop closes."""
+    """A two-frame cycle ends at the strict-monotonicity rule, not a cycle guard.
+
+    A->B->A is a genuine cycle in guest memory, and the requirement that it
+    terminate is real. Nothing detects the repeat as such: B's saved BP is
+    below B, so `saved_bp <= bp` stops the walk after the two frames
+    collected on the way in.
+    """
     memory = {
         linear(SS, 0x1000): frame_bytes(0x1200, 0xAAAA, 0x1111),
         linear(SS, 0x1200): frame_bytes(0x1000, 0xBBBB, 0x2222),
     }
     gdb = FakeGDB({"ebp": 0x1000, "ss": SS}, memory)
 
-    assert walk_frames(gdb) == [
+    walked = walk_frames(gdb)
+
+    assert len(walked) == 2
+    assert walked == [
         Frame(bp=0x1000, return_off=0xAAAA, return_seg=0x1111, depth=0),
         Frame(bp=0x1200, return_off=0xBBBB, return_seg=0x2222, depth=1),
     ]
@@ -191,23 +208,133 @@ def test_walk_frames_stops_on_a_decreasing_bp():
     assert walk_frames(gdb) == [Frame(bp=0x1200, return_off=0xAAAA, return_seg=0x1111, depth=0)]
 
 
+def test_walk_frames_returns_nothing_when_a_register_is_missing():
+    """A `GDBLike` whose register dict omits `ss`/`ebp` must not raise `KeyError`."""
+
+    class Sparse(FakeGDB):
+        def read_registers(self) -> dict[str, int]:
+            return {"eax": 0}
+
+    assert walk_frames(Sparse()) == []
+
+
+def test_walk_frames_stops_on_a_short_memory_read():
+    """A truncated `m` reply ends the walk cleanly, keeping what was already read.
+
+    Which mechanism handles it is not observable: the explicit
+    `len(record) < FRAME_RECORD_SIZE` guard and the `struct.unpack` that
+    follows it now sit inside the same `try`, so a short record ends the
+    walk either way. What this pins is the contract -- nothing escapes a
+    function documented as never raising, and partial results survive.
+    """
+
+    class ShortSecondRead(FakeGDB):
+        def read_memory(self, address: int | str, length: int) -> bytes:
+            record = super().read_memory(address, length)
+            return record if self._reads == 1 else record[:-1]
+
+    memory = {
+        linear(SS, 0x1000): frame_bytes(0x1200, 0xAAAA, 0x1111),
+        linear(SS, 0x1200): frame_bytes(0x1400, 0xBBBB, 0x2222),
+    }
+    gdb = ShortSecondRead({"ebp": 0x1000, "ss": SS}, memory)
+
+    assert walk_frames(gdb) == [Frame(bp=0x1000, return_off=0xAAAA, return_seg=0x1111, depth=0)]
+
+
 def test_walk_frames_returns_nothing_for_a_zero_bp():
     gdb = FakeGDB({"ebp": 0x0000, "ss": SS}, {})
 
     assert walk_frames(gdb) == []
 
 
-def test_steps_out_returns_the_stop_reply_once_sp_rises_past_the_saved_bp_slot():
+def test_steps_out_waits_for_the_near_ret_not_the_pop_bp():
+    """`mov sp,bp / pop bp / ret`: `pop bp` lands on BP+2 and must not stop the walk.
+
+    SP goes BP-16 -> BP -> BP+2 -> BP+4. Stopping at BP+2 would return with
+    the CPU still on the callee's `ret`.
+    """
     gdb = FakeGDB(
         {"ebp": 0x1000, "esp": 0x0FF0, "ss": SS},
-        {},
-        step_script=[{"esp": 0x0FF4}, {"esp": 0x1000}, {"esp": 0x1004}],
+        step_script=[{"esp": 0x1000}, {"esp": 0x1002}, {"esp": 0x1004}],
     )
 
     reply = steps_out(gdb)
 
     assert reply == b"S05"
     assert gdb.steps == 3
+
+
+def test_steps_out_waits_for_the_far_retf():
+    """A far return pops offset and segment, leaving SP at BP+6."""
+    gdb = FakeGDB(
+        {"ebp": 0x1000, "esp": 0x0FF0, "ss": SS},
+        step_script=[{"esp": 0x1000}, {"esp": 0x1002}, {"esp": 0x1006}],
+    )
+
+    reply = steps_out(gdb)
+
+    assert reply == b"S05"
+    assert gdb.steps == 3
+
+
+def test_steps_out_waits_for_a_ret_n():
+    """`ret N` also discards N bytes of arguments, leaving SP at BP+4+N."""
+    gdb = FakeGDB(
+        {"ebp": 0x1000, "esp": 0x0FF0, "ss": SS},
+        step_script=[{"esp": 0x1000}, {"esp": 0x1002}, {"esp": 0x1008}],
+    )
+
+    reply = steps_out(gdb)
+
+    assert reply == b"S05"
+    assert gdb.steps == 3
+
+
+def test_steps_out_waits_for_the_ret_after_a_leave():
+    """`leave` is `mov sp,bp / pop bp` in one instruction, so it lands on BP+2."""
+    gdb = FakeGDB(
+        {"ebp": 0x1000, "esp": 0x0FF0, "ss": SS},
+        step_script=[{"esp": 0x1002}, {"esp": 0x1004}],
+    )
+
+    reply = steps_out(gdb)
+
+    assert reply == b"S05"
+    assert gdb.steps == 2
+
+
+def test_steps_out_rejects_a_bp_that_does_not_describe_the_current_frame():
+    """BP=0 -- no frame pointer, fresh real-mode entry, hand-written asm."""
+    gdb = FakeGDB({"ebp": 0x0000, "esp": 0x0FFE, "ss": SS})
+
+    with pytest.raises(FrameWalkError, match="does not describe the current frame"):
+        steps_out(gdb)
+
+    assert gdb.steps == 0
+
+
+def test_steps_out_rejects_a_stale_bp_below_sp():
+    """A BP left over from an already-returned frame sits below the live SP."""
+    gdb = FakeGDB({"ebp": 0x1000, "esp": 0x1200, "ss": SS})
+
+    with pytest.raises(FrameWalkError, match="does not describe the current frame"):
+        steps_out(gdb)
+
+    assert gdb.steps == 0
+
+
+def test_steps_out_accepts_a_frame_with_no_locals():
+    """`SP == BP` is legal: `push bp / mov bp,sp` with nothing pushed after it."""
+    gdb = FakeGDB(
+        {"ebp": 0x1000, "esp": 0x1000, "ss": SS},
+        step_script=[{"esp": 0x1002}, {"esp": 0x1004}],
+    )
+
+    reply = steps_out(gdb)
+
+    assert reply == b"S05"
+    assert gdb.steps == 2
 
 
 def test_steps_out_gives_up_after_max_steps():
