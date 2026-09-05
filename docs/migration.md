@@ -101,8 +101,14 @@ with DosboxSession(mounts={"c": "/path/to/host/dir"}, autoexec=["c:"]) as sessio
     lines = session.screen_lines()
 ```
 
-Two things a migrating launcher usually gets wrong here:
+Three things a migrating launcher usually gets wrong here:
 
+* **No window appears.** Sessions are headless by default (SDL's `dummy`
+  video and audio drivers), where the hand-rolled launcher opened a real,
+  focused window. The debug surface is unchanged -- `screen_lines()` and
+  `qmp.screendump()` both still work, verified byte-for-byte against a
+  windowed session -- so this only matters if you were WATCHING the guest.
+  Pass `headless=False` to get the old behaviour back.
 * `program=` is recorded, not auto-run. A caller arming break-on-exec has to
   arm before the exec happens, so the session never runs it for you.
 * `boot_settle` (default 2.5 s) is the sleep the old launcher had between

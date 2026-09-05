@@ -22,12 +22,6 @@ import pytest
 from dbxdebug.paths import find_dosbox_x
 from dbxdebug.session import DosboxSession
 
-# SDL's null video/audio drivers. Without these the emulator opens a real
-# window and takes the developer's keyboard focus mid-test-run; with them the
-# full debug surface (GDB stub, QMP server, VGA text memory) still works --
-# verified against this build. Tracked as lokkju/dbxdebug#3.
-HEADLESS_ENV = {"SDL_VIDEODRIVER": "dummy", "SDL_AUDIODRIVER": "dummy"}
-
 # `DosboxSession.label` prefixes the scratch workdir name, so every workdir
 # these tests create is identifiable as theirs at a glance.
 SESSION_LABEL = "dbxdebug_it"
@@ -64,6 +58,12 @@ def dosbox_binary() -> Path:
 def build_session(binary: Path, **kwargs: Any) -> DosboxSession:
     """Build an UNSTARTED headless session against `binary`.
 
+    Headless comes from `DosboxSession(headless=True)`, which is the default:
+    without it the emulator opens a real window and takes the developer's
+    keyboard focus mid-test-run. These fixtures no longer set the SDL
+    variables by hand, so a regression in that default fails the live suite
+    by stealing focus -- and `test_headless.py` fails it on purpose.
+
     Args:
         binary: The emulator to launch.
         **kwargs: Passed straight through to `DosboxSession`.
@@ -73,7 +73,7 @@ def build_session(binary: Path, **kwargs: Any) -> DosboxSession:
         responsible for stopping it -- use `with`, or the `make_session`
         fixture, which does that for them.
     """
-    return DosboxSession(executable=binary, env=HEADLESS_ENV, label=SESSION_LABEL, **kwargs)
+    return DosboxSession(executable=binary, label=SESSION_LABEL, **kwargs)
 
 
 @pytest.fixture

@@ -24,7 +24,7 @@ import dbxdebug.session as session_module
 from dbxdebug.gdb import IncompatibleStubError
 from dbxdebug.paths import find_dosbox_x
 from dbxdebug.registry import _pid_alive, list_sessions, registry_dir
-from dbxdebug.session import DEFAULT_CONF, DosboxSession, render_conf
+from dbxdebug.session import DEFAULT_CONF, HEADLESS_ENV, DosboxSession, render_conf
 
 
 @pytest.fixture(autouse=True)
@@ -78,6 +78,72 @@ def test_default_conf_uses_spaced_port_keys_not_bare_ones():
     # end up connected to someone else's emulator, not its own.
     assert "gdbport" not in text
     assert "qmpport" not in text
+
+
+def test_default_conf_pins_autolock_off_so_a_visible_window_cannot_grab_the_mouse():
+    # Only matters with `headless=False`, where the window is real: one
+    # stray click in it would otherwise lock the host mouse to the guest.
+    text = render_conf(DEFAULT_CONF, {"sdl_output": "surface"})
+    assert "autolock = false" in text
+
+
+# --------------------------------------------------------------------------
+# headless / child environment
+# --------------------------------------------------------------------------
+
+
+def test_headless_is_the_default():
+    # A behaviour change, and the one the whole feature turns on: an
+    # unconfigured session must not open a window.
+    assert DosboxSession().headless is True
+
+
+def test_headless_puts_the_dummy_sdl_drivers_in_the_child_environment():
+    env = DosboxSession()._child_env()
+    assert env["SDL_VIDEODRIVER"] == "dummy"
+    assert env["SDL_AUDIODRIVER"] == "dummy"
+
+
+def test_headless_false_adds_no_sdl_overrides_of_its_own(monkeypatch):
+    monkeypatch.delenv("SDL_VIDEODRIVER", raising=False)
+    monkeypatch.delenv("SDL_AUDIODRIVER", raising=False)
+    env = DosboxSession(headless=False)._child_env()
+    assert "SDL_VIDEODRIVER" not in env
+    assert "SDL_AUDIODRIVER" not in env
+
+
+def test_headless_beats_an_inherited_sdl_videodriver(monkeypatch):
+    # Otherwise a developer who exports SDL_VIDEODRIVER gets a window from a
+    # session that explicitly asked not to have one.
+    monkeypatch.setenv("SDL_VIDEODRIVER", "x11")
+    assert DosboxSession()._child_env()["SDL_VIDEODRIVER"] == "dummy"
+
+
+def test_caller_env_beats_headless():
+    # `env` is the escape hatch, and an escape hatch a flag can override is
+    # not one. This is also what keeps `env=` behaving as it did before
+    # `headless` existed.
+    env = DosboxSession(headless=True, env={"SDL_VIDEODRIVER": "x11"})._child_env()
+    assert env["SDL_VIDEODRIVER"] == "x11"
+    assert env["SDL_AUDIODRIVER"] == "dummy"  # composed, not clobbered
+
+
+def test_caller_env_still_passes_unrelated_variables_through():
+    env = DosboxSession(env={"DBXDEBUG_MARKER": "hello"})._child_env()
+    assert env["DBXDEBUG_MARKER"] == "hello"
+    assert env["SDL_VIDEODRIVER"] == "dummy"
+
+
+def test_child_env_inherits_the_parent_environment(monkeypatch):
+    monkeypatch.setenv("DBXDEBUG_INHERITED", "yes")
+    assert DosboxSession()._child_env()["DBXDEBUG_INHERITED"] == "yes"
+
+
+def test_child_env_does_not_mutate_headless_env_or_os_environ():
+    before = dict(HEADLESS_ENV)
+    DosboxSession(env={"DBXDEBUG_MARKER": "hello"})._child_env()
+    assert dict(HEADLESS_ENV) == before
+    assert "DBXDEBUG_MARKER" not in os.environ
 
 
 # --------------------------------------------------------------------------
@@ -269,7 +335,8 @@ def test_session_starts_connects_and_tears_down_idempotently():
     # No explicit `workdir=`: the session must allocate and own its own
     # private tempdir for `_cleanup_workdir` to remove it on stop().
     session = DosboxSession(
-        env={"SDL_VIDEODRIVER": "dummy"},
+        # headless=True is the default; not repeated here, so a regression in
+        # that default opens a window during the test run.
         install_hooks=False,  # keep atexit/signal hooks out of the test run
     )
     try:
