@@ -37,6 +37,9 @@ class FakeSocket:
         line = data.decode().strip()
         self.sent.append(json.loads(line))
 
+    def setsockopt(self, level: int, optname: int, value: int) -> None:
+        """No-op: the real client sets TCP_NODELAY on connect."""
+
     def recv(self, _bufsize: int) -> bytes:
         if not self._replies:
             return b""

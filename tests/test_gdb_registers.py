@@ -76,6 +76,9 @@ class FakeSocket:
     def sendall(self, data: bytes) -> None:
         self.sent.append(data)
 
+    def setsockopt(self, level: int, optname: int, value: int) -> None:
+        """No-op: the real client sets TCP_NODELAY on connect."""
+
     def recv(self, _bufsize: int) -> bytes:
         if not self._chunks:
             return b""

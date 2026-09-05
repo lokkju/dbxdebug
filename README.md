@@ -115,10 +115,7 @@ Conveniences on the handle: `screen_lines()`, `read_bulk()`, `wait_for_text()`,
 ### Reading a region: `session.read_bulk(address, length)`
 
 One QMP `memdump` reply instead of thousands of GDB `m` round-trips.
-Measured on this build, one 64 KB segment: **0.124 s** through
-`read_bulk` against **5.25 s** through 64 one-kilobyte `gdb.read_memory`
-calls -- 42x, and the gap widens with the region, because a GDB
-round-trip costs about 82 ms here whatever its size. Both paths return
+Measured on this build, one 64 KB segment: **2.8 ms** through `read_bulk` against **33.5 ms** for the same bytes through 64 one-kilobyte `gdb.read_memory` calls -- 12x against a running guest, and 2.6x (2.1 ms against 5.5 ms) when the CPU is already halted, where the loop has no emulation competing with it. Both paths return
 identical bytes; the live suite asserts it.
 
 ```python

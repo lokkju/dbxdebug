@@ -107,6 +107,9 @@ class FakeSocket:
         """
         self.sent.append(data)
 
+    def setsockopt(self, level: int, optname: int, value: int) -> None:
+        """No-op: the real client sets TCP_NODELAY on connect."""
+
     def recv(self, _bufsize: int) -> bytes:
         """Return the next queued chunk, or raise at a queued `Timeout`.
 

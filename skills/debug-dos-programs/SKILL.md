@@ -199,10 +199,7 @@ round-trips** before this was understood — one per small chunk.
 data = session.read_bulk(0xF0000, 0x10000)   # -> 65536 bytes
 ```
 
-Measured on this build, one 64 KB segment: **0.124 s** through `read_bulk` —
-status query, halt and resume included — against **5.25 s** for the same bytes
-through 64 one-kilobyte `gdb.read_memory` calls. 42x, and it widens with the
-region, because a GDB round-trip costs about **82 ms** here whatever its size.
+Measured on this build, one 64 KB segment: **2.8 ms** through `read_bulk` -- the status query, the halt and the resume included -- against **33.5 ms** for the same 65,536 bytes through 64 one-kilobyte `gdb.read_memory` calls. 12x against a running guest; 2.6 ms against 5.5 ms, so 2.6x, when the CPU is already halted and the loop has no emulation competing with it. Both ends set TCP_NODELAY now; before that a round-trip cost ~82 ms of Nagle stall and the same comparison read 42x.
 Both paths return identical bytes.
 
 `read_bulk` halts through GDB, dumps, and resumes. If the CPU was **already**

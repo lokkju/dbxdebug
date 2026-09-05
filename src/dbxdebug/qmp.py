@@ -84,6 +84,13 @@ class QMPClient:
         logger.debug(f"Connecting to QMP server at {host}:{port}")
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((host, port))
+        # The protocol is strictly request/response with tiny packets, the
+        # workload Nagle punishes worst: each side holds a small write waiting
+        # for an ACK the peer has delayed. Measured ~82ms per round-trip with
+        # it on, ~41ms with only this side fixed -- one ~40ms stall per
+        # direction, so the stub has to set it too. There is no batching here
+        # to preserve, so there is no tradeoff being made.
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.buffer = ""
 
         # Read greeting

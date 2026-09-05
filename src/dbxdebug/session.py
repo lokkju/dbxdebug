@@ -925,15 +925,24 @@ class DosboxSession:
         chunk; a recorded segment scan spent 7,168 of them. QMP `memdump`
         reads the whole range inside the emulator and ships it back in a
         single reply. Measured live against this build, reading one 64 KB
-        real-mode segment: 0.124 s through `read_bulk` -- the status query,
-        the halt and the resume included -- against 5.25 s for the same
-        65,536 bytes through 64 one-kilobyte `gdb.read_memory` calls. 42x,
-        and it grows with the region, because a GDB round-trip costs about
-        82 ms here whatever its size (the stub is polled from the emulation
-        thread, so the chunk size barely matters and the trip count is
-        everything). The recorded 7,168-round-trip scan works out at roughly
-        ten minutes of pure latency. Both paths return identical bytes; the
-        live suite asserts it.
+        real-mode segment: 2.8 ms through `read_bulk` -- the status query,
+        the halt and the resume included -- against 33.5 ms for the same
+        65,536 bytes through 64 one-kilobyte `gdb.read_memory` calls, so 12x
+        against a running guest. Against an ALREADY-HALTED CPU the margin
+        narrows to 2.6x (2.1 ms against 5.5 ms): with no emulation competing
+        for the thread that services the stub, the loop gets much cheaper
+        while this path does not. Below a few kilobytes the halt and resume
+        cost more than the round-trips they save, and a plain
+        `gdb.read_memory` is the better call.
+
+        These numbers are much smaller than they once were. Both ends now set
+        TCP_NODELAY; before that a round-trip cost ~82 ms of Nagle stall
+        regardless of payload size, trip count was the entire cost, and this
+        same comparison read 42x. The advantage is real but it is now about
+        avoiding round-trips on large regions, not about escaping a
+        pathological per-trip cost.
+
+        Both paths return identical bytes; the live suite asserts it.
 
         Two undocumented rules make the raw sequence easy to get wrong, and
         this method exists to hold both:
