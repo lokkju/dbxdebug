@@ -260,8 +260,8 @@ def analyze_dos_video_colors(video_pages: list[bytes], cols: int = 80, rows: int
 
     total_cells = 0
     content_cells = 0
-    fg_color_counts = {i: 0 for i in range(16)}
-    bg_color_counts = {i: 0 for i in range(16)}
+    fg_color_counts = dict.fromkeys(range(16), 0)
+    bg_color_counts = dict.fromkeys(range(16), 0)
     combination_counts: dict[str, int] = {}
     page_stats = []
 

@@ -478,7 +478,7 @@ def screen_info(ctx):
             click.echo(f"BIOS ticks: {ticks}" if ticks else "BIOS ticks: unknown")
             if ticks:
                 seconds = ticks / 18.2065
-                click.echo(f"Uptime: {seconds:.1f}s ({seconds/60:.1f}m)")
+                click.echo(f"Uptime: {seconds:.1f}s ({seconds / 60:.1f}m)")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
