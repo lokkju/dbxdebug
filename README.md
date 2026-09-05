@@ -50,10 +50,9 @@ For working on dbxdebug itself, `uv sync`.
 ```python
 from dbxdebug.session import DosboxSession
 
-# Without these DOSBox-X opens a real window and takes your keyboard focus.
-HEADLESS = {"SDL_VIDEODRIVER": "dummy", "SDL_AUDIODRIVER": "dummy"}
-
-with DosboxSession(env=HEADLESS) as session:
+# Headless by default: no window, no keyboard focus, no audio device.
+# Pass headless=False when you want to watch the guest.
+with DosboxSession() as session:
     print(f"pid={session.pid} gdb={session.gdb_port} qmp={session.qmp_port}")
 
     gdb = session.gdb
@@ -81,11 +80,34 @@ Leaving the `with` block kills the emulator's whole process group, deletes the
 scratch workdir, and removes the registry entry. `atexit` and SIGINT/SIGTERM
 handlers repeat that teardown for a process that leaves by some other door.
 
+### Headless is the default
+
+A session runs with SDL's `dummy` video and audio drivers, so it opens **no
+window**, takes no keyboard focus, and claims no audio device. Starting one
+does not take over the display of whoever is at the machine, which is what
+makes a test suite -- or several sessions at once -- usable on a workstation.
+
+What you give up is real: you cannot watch the guest. `headless=False` gives
+you a normal window, and that window will take the focus of whoever is at the
+keyboard, so it is for looking at one session, not for a suite.
+
+The debug surface is unaffected. `screen_lines()` reads guest video memory
+over GDB and `qmp.screendump()` renders through DOSBox-X's own capture path;
+`dummy` removes the window, not the rendering. Compared live, a headless
+session and a windowed session showing the same screen returned
+**byte-identical** 720x400 PNGs and identical text lines.
+
+`env=` still works and takes precedence over the headless variables, so
+`DosboxSession(headless=True, env={"SDL_VIDEODRIVER": "x11"})` keeps the dummy
+audio driver and gets an x11 window. Precedence, lowest to highest: inherited
+`os.environ`, then the headless variables, then `env`.
+
 Useful `DosboxSession` arguments: `mounts={"c": path}`, `program=` and
 `files=` to stage host files onto the first mounted drive, `autoexec=`,
-`conf=` for your own conf template, `cycles=`, `connect=False` for the handle
-without clients, `boot_settle=` (default 2.5s -- the debug ports accept long
-before the guest reaches a prompt), and `label=` to name the scratch workdir.
+`conf=` for your own conf template, `cycles=`, `headless=False` for a visible
+window, `connect=False` for the handle without clients, `boot_settle=`
+(default 2.5s -- the debug ports accept long before the guest reaches a
+prompt), and `label=` to name the scratch workdir.
 Conveniences on the handle: `screen_lines()`, `wait_for_text()`,
 `assert_screen_readable()`, `running`, `set_breakpoint()`,
 `remove_breakpoint()`.
@@ -447,6 +469,11 @@ fake socket in `tests/test_gdb_framing.py`.
 The binary is located with `dbxdebug.paths.find_dosbox_x`
 -- set `DBXDEBUG_DOSBOX` to choose a specific build -- and the tests skip when
 none is found.
+
+One test in `tests/integration/test_headless.py` is skipped even under the
+`integration` marker: the one that compares a headless screen capture against
+a windowed one has to launch a real window, which takes the keyboard focus of
+whoever is at the machine. Set `DBXDEBUG_ALLOW_WINDOWED=1` to run it.
 
 The other gates:
 

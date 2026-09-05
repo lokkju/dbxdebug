@@ -10,9 +10,8 @@ Common preamble for every Python snippet:
 from dbxdebug.session import DosboxSession
 from dbxdebug.addressing import linear
 
-# Without these DOSBox-X opens a real window and takes the user's keyboard
-# focus. A first-class headless mode is open as lokkju/dbxdebug#3.
-HEADLESS = {"SDL_VIDEODRIVER": "dummy", "SDL_AUDIODRIVER": "dummy"}
+# Sessions are headless by default: no window, no keyboard focus. Pass
+# headless=False only when a human wants to watch the guest.
 ```
 
 ---
@@ -44,7 +43,7 @@ registry directory (default `~/.cache/dbxdebug-sessions`).
 ## 2. Start a session and wait for a real prompt
 
 ```python
-with DosboxSession(mounts={"c": host_dir}, env=HEADLESS, label="mywork") as session:
+with DosboxSession(mounts={"c": host_dir}, label="mywork") as session:
     # GDBClient arms a 30s read deadline of its own, so an unanswered packet
     # raises GDBTimeoutError rather than hanging. Override it only if that
     # bound is wrong for your workload:
@@ -84,7 +83,6 @@ session.assert_screen_readable()   # raises on a blank screen or the DOSBox-X ba
 with DosboxSession(
     mounts={"c": drive},
     autoexec=[f"mount c {drive}", "c:", "PROG.EXE"],
-    env=HEADLESS,
 ) as session:
     assert session.wait_for_text("READY", timeout=60) is not None
 ```

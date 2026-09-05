@@ -65,6 +65,11 @@ USAGE::
         s.gdb.read_registers()                     # connected clients
         s.qmp.type_text("PROG\\r")
 
+Sessions are HEADLESS by default -- no window, no keyboard focus, no audio
+device -- so starting one does not take over the display of whoever is at
+the machine. Pass `headless=False` to get a real window when you want to
+watch the guest. See `HEADLESS_ENV` and `DosboxSession._child_env`.
+
 Everything the session created dies with the `with` block: the emulator and
 any child it spawned (process-GROUP kill, SIGTERM then SIGKILL), the private
 workdir (`shutil.rmtree` from Python, never a shell `rm`), and the registry
@@ -112,12 +117,40 @@ from .video import decode_text_screen
 # into a throughput failure rather than a rendering choice.
 DEFAULT_SDL_OUTPUT = "surface"
 
+# Child-environment overrides that make SDL open no window and no audio
+# device. This is the mechanism behind `DosboxSession(headless=True)`.
+#
+# Environment, not conf, deliberately. DOSBox-X does have a `[sdl]
+# videodriver` key -- it `putenv`s `SDL_VIDEODRIVER` from it before
+# `SDL_Init` -- but there is no audio equivalent, and a caller who passes
+# their own `conf=` template would silently lose the setting. That is the
+# failure mode most worth avoiding: a session that opens a window again
+# because the caller customised something unrelated. The environment
+# applies to every conf, including one this package never sees.
+#
+# `dummy` for video keeps DOSBox-X's whole render pipeline running against
+# an offscreen surface rather than disabling it, which is why
+# `qmp.screendump()` and the `0xB8000` text readers are unaffected -- see
+# `tests/integration/test_headless.py`, which compares both against a
+# non-headless session.
+HEADLESS_ENV: Mapping[str, str] = {
+    "SDL_VIDEODRIVER": "dummy",
+    "SDL_AUDIODRIVER": "dummy",
+}
+
 # `{gdb_port}`, `{qmp_port}`, `{workdir}`, `{autoexec}`, `{cycles}` and
 # `{sdl_output}` are substituted by `render_conf`. Note the SPACE in
 # "gdbserver port" / "qmpserver port" -- those are the actual DOSBox-X conf
 # key names. "gdbport"/"qmpport" (no space) are silently ignored by
 # DOSBox-X, which leaves the server on its compiled-in default port and
 # makes a session connect to whatever else happens to be listening there.
+#
+# `autolock = false` is pinned rather than left to DOSBox-X's compiled-in
+# default (which is already `false`, in `sdlmain.cpp`'s `[sdl]` section).
+# It only matters for `headless=False`, where the window is real: with
+# autolock on, one stray click inside it grabs the host mouse until the
+# user finds Ctrl+F10. Pinning it is one line and removes a dependency on
+# an upstream default that upstream is free to change.
 DEFAULT_CONF = """\
 [dosbox]
 gdbserver = {gdbserver}
@@ -129,6 +162,7 @@ quit warning = false
 [sdl]
 output = {sdl_output}
 fullscreen = false
+autolock = false
 
 [cpu]
 core = normal
@@ -259,6 +293,16 @@ class DosboxSession:
                   guest.
     `connect`     connect GDB and QMP once both ports accept. False for
                   callers that want the handle only.
+    `headless`    **default True.** Launch with SDL's `dummy` video and audio
+                  drivers so the emulator opens NO window, takes no keyboard
+                  focus, and claims no audio device. What you give up is real:
+                  you cannot WATCH the guest. Pass `headless=False` when you
+                  want to see what the emulator is doing -- the window that
+                  then appears will take the focus of whoever is at the
+                  keyboard, so do not leave it on in a test suite.
+    `env`         extra child-process environment. Merged OVER the headless
+                  variables, so `headless=True, env={"SDL_VIDEODRIVER": "x11"}`
+                  gets an x11 window; see `_child_env`.
     """
 
     conf: str | Path | None = None
@@ -271,6 +315,25 @@ class DosboxSession:
     executable: str | Path = field(default_factory=configured_dosbox_x_path)
     env: Mapping[str, str] | None = None
     connect: bool = True
+    # Run with no window at all: `HEADLESS_ENV` in the child environment.
+    #
+    # DEFAULT TRUE, which is a deliberate behaviour change -- every session
+    # this package launched before this flag existed opened a real, focused
+    # SDL window. The evidence for flipping it is that every caller in this
+    # repository was already opting out of that window by hand: the
+    # integration conftest, the README quick start, and the skill recipes
+    # all passed the same two SDL variables through `env=`. A default that
+    # 100% of known callers immediately override is the wrong default.
+    #
+    # The cost is not zero and is not hidden: headless removes the ability
+    # to WATCH the guest, which is a real debugging affordance. That is what
+    # `headless=False` is for, and it is one keyword.
+    #
+    # `-nogui`, `-nomenu` and `-silent` are NOT alternatives. The first two
+    # concern the configuration GUI and the menu bar, not the window; the
+    # third does set both dummy drivers but also sets `opt_exit`, so the
+    # emulator quits instead of running.
+    headless: bool = True
     # Whether the conf turns DOSBox-X's gdbserver on. `False` means no
     # gdbserver line is expected in the conf: `start()` waits for the QMP
     # port only and connects no GDB client.
@@ -580,6 +643,32 @@ class DosboxSession:
             raise DosboxLaunchError("could not allocate two free ports")
         self.gdb_port, self.qmp_port = ports
 
+    def _child_env(self) -> dict[str, str]:
+        """Build the emulator's environment: inherited, then headless, then `env`.
+
+        Precedence, lowest to highest:
+
+        1. `os.environ`, so the child inherits the parent's world.
+        2. `HEADLESS_ENV`, when `headless` is True. It has to beat
+           `os.environ`, or a developer with `SDL_VIDEODRIVER` already
+           exported would get a window from a session that asked not to
+           have one.
+        3. `self.env`, which beats both. `env` is the escape hatch, and an
+           escape hatch that a flag can override is not one -- this is what
+           lets a caller keep every other headless property while forcing a
+           specific driver, and what keeps `env` working exactly as it did
+           before `headless` existed.
+
+        Returns:
+            A complete environment mapping for `subprocess.Popen`.
+        """
+        env = dict(os.environ)
+        if self.headless:
+            env.update(HEADLESS_ENV)
+        if self.env:
+            env.update(self.env)
+        return env
+
     def _spawn(self) -> None:
         """Allocate ports, write the conf, and launch DOSBox-X in its own process group."""
         self._allocate_ports()
@@ -590,15 +679,12 @@ class DosboxSession:
             # so it cannot be opened with a `with` block here.
             self._log_fh = open(Path(self.log), "ab")  # noqa: SIM115
             stdout = self._log_fh
-        env = dict(os.environ)
-        if self.env:
-            env.update(self.env)
         self.proc = subprocess.Popen(
             [str(self.executable), "-conf", str(self.conf_path)],
             stdout=stdout,
             stderr=subprocess.STDOUT if self.log is not None else subprocess.DEVNULL,
             cwd=str(self.workdir),
-            env=env,
+            env=self._child_env(),
             # A new session means a new process GROUP, which is what makes
             # `_kill_process` able to take the emulator's children with it.
             start_new_session=True,

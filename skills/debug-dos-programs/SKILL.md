@@ -58,9 +58,7 @@ Always as a context manager. Never hand-roll a `subprocess.Popen`.
 ```python
 from dbxdebug.session import DosboxSession   # NOT `from dbxdebug import ...`
 
-HEADLESS = {"SDL_VIDEODRIVER": "dummy", "SDL_AUDIODRIVER": "dummy"}
-
-with DosboxSession(mounts={"c": host_dir}, env=HEADLESS) as session:
+with DosboxSession(mounts={"c": host_dir}) as session:
     ...
 ```
 
@@ -87,9 +85,11 @@ Two things that surprise people:
 - **`program=` is recorded, not auto-run.** A caller arming break-on-exec has
   to arm before the exec happens, so the session never runs it for you. Use
   `autoexec=` if you want it launched at boot, or type it yourself.
-- **Headless is not a parameter.** Pass `env=HEADLESS` as above, or DOSBox-X
-  opens a real window and steals the user's keyboard focus. A first-class
-  headless mode is open as lokkju/dbxdebug#3.
+- **Headless is the DEFAULT.** A session opens no window and steals no
+  keyboard focus. The debug surface is unaffected -- `screen_lines()` and
+  `qmp.screendump()` both work headless, verified byte-for-byte against a
+  windowed session. Pass `headless=False` only when a human wants to watch
+  the guest; it takes the user's focus.
 
 `import dbxdebug` does **not** re-export `DosboxSession`, `addressing`,
 `frames`, `registry`, `paths` or `doctor` (lokkju/dbxdebug#7). Import those
