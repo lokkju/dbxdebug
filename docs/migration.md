@@ -31,13 +31,25 @@ emulator repo). All of that is now a dependency:
 uv add dbxdebug
 ```
 
-**Check what you got before you write any of the code below.** The version
-published on PyPI at the time of writing is 0.2.1, and it ships the original
-client surface only: no `session`, no `addressing`, no `frames`, no
-`registry`, no `doctor`. Everything this document describes needs a release
-newer than that, which has not been published yet. Until it is, depend on the
-repository directly (`uv add --editable ../dbxdebug`, or a git dependency),
-and confirm with:
+**Check what you got before you write any of the code below.** The latest
+release on PyPI is 0.3.0, which does ship `session`, `addressing`, `frames`,
+`registry` and `doctor` -- but several things this document describes landed
+*after* that tag: bounded and resynchronising GDB reads, the borrowable GDB
+client, headless-by-default, and `session.read_bulk`. Until a newer release
+exists, depend on the repository directly and pin an exact commit.
+
+Prefer a **git dependency with a full SHA** over `uv add --editable
+../dbxdebug`: uv resolves a relative path source against the consuming
+project's own directory, so a relative path breaks inside a git worktree and
+on any checkout without a sibling clone. A SHA also keeps `uv.lock`
+reproducible.
+
+Note `dbxdebug` requires **Python >= 3.11**. A consumer declaring `>=3.10`
+will get a hard resolver failure; add an environment marker
+(`python_full_version >= '3.11'`) rather than narrowing your own floor for a
+tooling-only dependency.
+
+Confirm what you actually got with:
 
 ```bash
 uv run python -c "import dbxdebug.addressing, dbxdebug.session, dbxdebug.frames; print('ok')"
@@ -294,7 +306,7 @@ copy may differ further -- in particular it will not have the
 | `remove_breakpoint(addr) -> bool` | `remove_breakpoint(address) -> bool` | As above |
 | `step() -> str` | `step() -> bytes` | Every packet-returning method now returns `bytes` |
 | `continue_() -> str` | `continue_execution() -> bytes` | Renamed |
-| `halt() -> str` (sends `\x03`) | `halt() -> bytes` (sends `?`) | Different packet, same effect against this stub: both send a stop reply and pause the CPU |
+| `halt() -> str` (sends `\x03`) | `halt() -> bytes` (sends `?`) | Different packet, same effect **against this stub**: both send a stop reply and pause the CPU. Not interchangeable in general -- a stock QEMU gdbstub answers the `\x03` interrupt but never reads a bare `?` as one, so code driving QEMU must keep sending `\x03` |
 | `query_halt_reason() -> str` (sends `?`) | `halt() -> bytes` | Collapsed into `halt()` |
 | `wait_for_stop(timeout)` | -- | No equivalent. Poll `qmp.query_status()["running"]`, on the QMP connection |
 | `detach()` | -- | No equivalent; `close()` only |
@@ -437,6 +449,23 @@ gdb.take_pending_stops()          # [b'S05'] -- the stop, delivered once
 Note that a `Z0` breakpoint armed while free-running is inert and never was a
 trigger -- activation only happens on continue.
 
+**The queue is filled by the client's framing layer while it reads, not by the
+socket receiving anything.** Until you issue some GDB request, an unsolicited
+`S05` sits unread in the kernel buffer and `take_pending_stops()` returns
+empty. A poller written as "loop calling `take_pending_stops()` until it is
+non-empty" therefore spins forever on a stop that has genuinely happened:
+
+```python
+gdb.take_pending_stops()          # () -- nothing has read the socket yet
+gdb.read_memory(0x400, 4)         # any request; the framing layer sees the S05
+gdb.take_pending_stops()          # (b'S05',)
+```
+
+Give your poll loop a cheap read -- a few bytes of the BDA will do -- before
+taking the queue. `qmp.query_status()` on the separate QMP socket has no such
+ordering requirement and is the simpler signal when you are not otherwise
+talking GDB.
+
 **Trigger 2 -- a timed-out request.** The abandoned reply used to stay in the
 stream and be handed to the next request:
 
@@ -465,7 +494,7 @@ What a consumer should still do:
   one-packet lag perfectly, so retrying looks like it works whether or not the
   stream has shifted.
 * If you arm `debug_break_on_exec`, drain `gdb.take_pending_stops()` to learn
-  the CPU stopped. Polling `qmp.query_status()` on the separate QMP socket
+  the CPU stopped -- after a read, per the ordering note above. Polling `qmp.query_status()` on the separate QMP socket
   still works and is still the way to wait for it.
 
 ### 5.3 One GDB client at a time (lokkju/dbxdebug#8, open)
