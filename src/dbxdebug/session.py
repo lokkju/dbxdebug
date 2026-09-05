@@ -308,10 +308,12 @@ class DosboxSession:
     # Wall seconds for each client's connect retry loop, after readiness.
     #
     # This package's `GDBClient`/`QMPClient` connect (and, for GDB, complete
-    # the capability handshake) inside `__init__` with no per-call timeout
-    # of their own, so a stub that accepts the TCP connection but never
-    # answers the handshake can still block past this deadline -- this
-    # bounds RETRIES of a refused connection, not a hung one.
+    # the capability handshake) inside `__init__`, so this bounds RETRIES of
+    # a refused connection, not a hung one. `GDBClient` arms its own read
+    # timeout (`gdb.DEFAULT_TIMEOUT`), so a GDB stub that accepts the TCP
+    # connection and never answers the handshake fails one attempt rather
+    # than blocking. `QMPClient` still has no timeout of its own, so the
+    # same stall on the QMP side can still block past this deadline.
     connect_timeout: float = 30.0
     # How many times a failed launch is retried with FRESH ports. The bind
     # race documented in the module docstring is why this is not zero.

@@ -30,15 +30,18 @@ it doubles the round-trips on every single word and, worse, it would
 silently paper over a genuine protocol desync instead of surfacing it --
 note that two identical consecutive requests mask a one-packet lag
 perfectly, so "until two consecutive reads agree" would have looked like it
-worked whether or not the stream had shifted. Note carefully what is and is
-not being claimed: nobody has demonstrated that the desync was fixed.
-`GDBClient` assumes strict request/response, does not negotiate no-ack
-mode, and never resynchronises its stream, so an unsolicited stop reply or
-a timed-out request shifts every later reply by one packet -- tracked as
-lokkju/dbxdebug#4 and #5, with live tests in
-`tests/integration/test_live_session.py`. So: `walk_frames` reads each frame
-exactly once via `GDBClient.read_memory`. A stale-payload read is a bug in
-the client or the stub and must be fixed there, not compensated for here.
+worked whether or not the stream had shifted. Both ways of producing that
+shift -- an unsolicited stop reply, and a timed-out request whose abandoned
+reply is read as the next answer -- were reproduced live and then fixed in
+`GDBClient` itself, which is the right layer: it bounds every read, drains
+exactly what an abandoned exchange still owes before sending anything else,
+diverts stop replies nobody asked for into `GDBClient.pending_stops`, and
+marks itself unusable rather than answering when a drain cannot complete.
+Live tests for both are in `tests/integration/test_live_session.py`, framing
+tests in `tests/test_gdb_framing.py`. Nothing here changed as a result:
+`walk_frames` still reads each frame exactly once via
+`GDBClient.read_memory`. A stale-payload read is a bug in the client or the
+stub and must be fixed there, not compensated for here.
 """
 
 import struct
