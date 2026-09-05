@@ -1,12 +1,18 @@
 """
-QEMU Monitor Protocol (QMP) client for DOSBox-X keyboard input.
+QEMU Monitor Protocol (QMP) client for DOSBox-X.
 
 Provides keyboard input injection via the QMP protocol:
 - send_key(): Press and release keys with timing control
 - key_down()/key_up(): Explicit press/release control
 - type_text(): Type a string of characters
+
+Also wraps the rest of the commands the DOSBox-X QMP server dispatches:
+memory and screen capture (memdump, screendump), save state control
+(savestate, loadstate), run control (stop, cont, system_reset,
+query_status), and debugger setup (debug_break_on_exec).
 """
 
+import base64
 import json
 import socket
 import time
@@ -225,6 +231,195 @@ class QMPClient:
         """
         response = self._send_command("query-commands")
         return [cmd["name"] for cmd in response.get("return", [])]
+
+    def memdump(self, address: int, size: int, file: str | None = None) -> bytes | str:
+        """
+        Dump a range of guest memory in a single round-trip.
+
+        This is the bulk-read path: one `memdump` call replaces thousands of
+        GDB `m` round-trips. A recorded segment scan cost 7,168 of them
+        before this existed, one per small chunk of memory; `memdump` reads
+        the whole range server-side and ships it back in one reply.
+
+        Without `file`, the server base64-encodes the dump into the reply
+        and this method decodes it to `bytes`, capped at a 16 MB
+        server-side limit. With `file`, the server writes the dump to that
+        path on the machine running DOSBox-X and returns the path instead
+        of transferring the bytes.
+
+        IMPORTANT: this command REQUIRES the CPU to be stopped -- via a GDB
+        halt, the interactive debugger, or a QMP `stop` -- before it will
+        run. It reads guest memory directly, off the socket thread, and
+        would race the emulation thread otherwise; DOSBox-X refuses the
+        request rather than risk a torn read. A caller who does not know
+        this will see a confusing `QMPError` about the CPU not being
+        stopped, so stop the CPU first.
+
+        Args:
+            address: Linear guest address to start reading from
+            size: Number of bytes to read (server limit: 16 MB)
+            file: Optional server-side path to write the dump to instead of
+                returning it inline
+
+        Returns:
+            The dumped bytes, or the server-side file path if `file` was given
+
+        Raises:
+            QMPError: If the CPU is not stopped, or the dump otherwise fails
+        """
+        arguments: dict = {"address": address, "size": size}
+        if file is not None:
+            arguments["file"] = file
+        response = self._send_command("memdump", arguments)
+        result = response.get("return", {})
+        if "file" in result:
+            return result["file"]
+        return base64.b64decode(result["data"])
+
+    def screendump(self, file: str | None = None) -> dict:
+        """
+        Capture the current display as a PNG.
+
+        Args:
+            file: Optional server-side path to write the screenshot to.
+                Without it, the reply includes base64-encoded PNG data.
+
+        Returns:
+            The response's `return` dict (keys vary: `data`/`size`/`format`/
+            `file` without `file`, `file`/`size`/`format` with it)
+        """
+        arguments = {"file": file} if file is not None else None
+        response = self._send_command("screendump", arguments)
+        return response.get("return", {})
+
+    def savestate(self, file: str) -> dict:
+        """
+        Save emulator state to a file.
+
+        Args:
+            file: Path to write the save state to
+
+        Returns:
+            Response dict, e.g. `{"file": <path>}`
+
+        Raises:
+            QMPError: If the save fails or times out
+        """
+        response = self._send_command("savestate", {"file": file})
+        return response.get("return", {})
+
+    def loadstate(self, file: str) -> dict:
+        """
+        Load emulator state from a file.
+
+        Args:
+            file: Path to the save state to load
+
+        Returns:
+            Response dict, e.g. `{"file": <path>}`
+
+        Raises:
+            QMPError: If the file is missing, the load fails, or it times out
+        """
+        response = self._send_command("loadstate", {"file": file})
+        return response.get("return", {})
+
+    def stop(self) -> dict:
+        """
+        Pause the emulator.
+
+        Idempotent: pausing an already-paused emulator succeeds.
+
+        Returns:
+            Response dict (empty on success)
+        """
+        response = self._send_command("stop")
+        return response.get("return", {})
+
+    def cont(self) -> dict:
+        """
+        Resume the emulator.
+
+        Idempotent: resuming an already-running emulator succeeds.
+
+        Returns:
+            Response dict (empty on success)
+        """
+        response = self._send_command("cont")
+        return response.get("return", {})
+
+    def system_reset(self, dos_only: bool = False) -> dict:
+        """
+        Reset the emulated system.
+
+        Refused while the CPU is halted for debugging (a GDB halt or the
+        interactive debugger), since resetting out from under an attached
+        debug client would leave it looking at registers, memory, and
+        breakpoints that no longer exist. A plain QMP `stop` does not block
+        this, since there is no debug client to confuse.
+
+        Args:
+            dos_only: If True, reset only the DOS environment rather than
+                the whole emulated machine
+
+        Returns:
+            Response dict (empty on success)
+
+        Raises:
+            QMPError: If the CPU is halted for debugging
+        """
+        response = self._send_command("system_reset", {"dos_only": dos_only})
+        return response.get("return", {})
+
+    def query_status(self) -> dict:
+        """
+        Query emulator and debugger run state.
+
+        The reply carries two independent signals: a flat `running` boolean
+        for the emulator as a whole, and a nested `debug` object
+        (`active`, `paused`, and optionally `reason`) for the debugger
+        specifically. Both are returned as-is -- neither is flattened nor
+        dropped, since a debugger pause and an emulator pause are distinct
+        states that happen to overlap in the `running`/`status` summary
+        fields.
+
+        Returns:
+            Response dict with `status`, `running`, `emulator-paused`, and
+            `debug` (itself `active`/`paused`/optional `reason`)
+        """
+        response = self._send_command("query-status")
+        return response.get("return", {})
+
+    def debug_break_on_exec(self, enabled: bool) -> dict:
+        """
+        Set or clear break-on-exec for the next DOS program launch.
+
+        When enabled, the debugger breaks at the entry point of the next
+        program executed via DOS.
+
+        Args:
+            enabled: True to arm the break, False to clear it
+
+        Returns:
+            Response dict, e.g. `{"enabled": <bool>}`
+        """
+        response = self._send_command("debug-break-on-exec", {"enabled": enabled})
+        return response.get("return", {})
+
+    def quit(self) -> None:
+        """
+        Send the `quit` command.
+
+        NOTE: `quit` (and its `system_powerdown` alias) is dispatched by the
+        DOSBox-X QMP server but is NOT advertised by `query-commands` -- it
+        won't appear in `query_commands()`'s output even though the server
+        accepts it. It also does not actually quit DOSBox-X: the server
+        acknowledges the command and does nothing else, by design.
+
+        Returns:
+            None
+        """
+        self._send_command("quit")
 
     def close(self) -> None:
         """Close the connection."""
