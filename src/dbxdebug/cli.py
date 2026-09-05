@@ -14,10 +14,13 @@ import time
 import click
 from loguru import logger
 
+from . import doctor as doctor_module
+from .addressing import linear_pc
 from .capture_io import ScreenRecorder, load_capture
-from .gdb import GDBClient
+from .gdb import REGISTER_NAMES, GDBClient
 from .html import analyze_dos_video_colors, dos_video_to_html
 from .qmp import QMPClient, QMPError
+from .registry import format_table, list_sessions, reap
 from .utils import hexdump, parse_x86_address
 from .video import DOSVideoTools
 
@@ -133,7 +136,9 @@ def cpu_regs(ctx):
     """Display all CPU registers."""
     try:
         with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
-            regs = gdb.read_registers()
+            reg_list = gdb.read_register_list()
+            regs = dict(zip(REGISTER_NAMES, reg_list, strict=True))
+            pc = linear_pc(reg_list)
             click.echo("General Purpose:")
             click.echo(f"  EAX={regs['eax']:08X}  ECX={regs['ecx']:08X}")
             click.echo(f"  EDX={regs['edx']:08X}  EBX={regs['ebx']:08X}")
@@ -142,6 +147,10 @@ def cpu_regs(ctx):
             click.echo()
             click.echo("Instruction Pointer:")
             click.echo(f"  EIP={regs['eip']:08X}  EFLAGS={regs['eflags']:08X}")
+            click.echo(
+                f"  PC={pc:08X}  (linear = CS*16 + EIP; EIP alone is an "
+                "offset within CS, not an address -- break/inspect at PC)"
+            )
             click.echo()
             click.echo("Segment Registers:")
             click.echo(f"  CS={regs['cs']:04X}  SS={regs['ss']:04X}  DS={regs['ds']:04X}")
@@ -603,6 +612,94 @@ def screen_colors(ctx, capture_file: str | None):
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+
+
+# =============================================================================
+# Session Management (registry.py / session.py)
+# =============================================================================
+
+
+@main.group()
+def session():
+    """Manage DOSBox-X sessions tracked in the local registry."""
+
+
+@session.command("list")
+def session_list():
+    """List sessions currently tracked in the registry.
+
+    Shows every session this machine's registry knows about, whether it is
+    still running, and whether its owning process is gone (ORPHAN).
+    """
+    click.echo(format_table(list_sessions()))
+
+
+@session.command("reap")
+@click.option(
+    "--all",
+    "all_sessions",
+    is_flag=True,
+    help="Also reap sessions that are still alive and owned, not just orphans.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Report what would be reaped without killing anything or deleting files.",
+)
+@click.option(
+    "--max-age",
+    "max_age_s",
+    type=float,
+    default=None,
+    help="Skip sessions younger than this many seconds.",
+)
+def session_reap(all_sessions: bool, dry_run: bool, max_age_s: float | None):
+    """Kill orphaned DOSBox-X sessions and remove their workdirs.
+
+    By default this only reaps sessions whose owning process has exited
+    (orphans) or whose registry entry is already stale. Pass --all to also
+    reap sessions that are still alive and owned.
+    """
+    try:
+        rows = reap(all_sessions=all_sessions, dry_run=dry_run, max_age_s=max_age_s)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+        return
+
+    if not rows:
+        click.echo("nothing to reap")
+        return
+
+    for row in rows:
+        detail = (
+            f"pid={row['pid']} action={row['action']} reason={row.get('reason', '?')} "
+            f"workdir={row.get('workdir') or '-'}"
+        )
+        if "kill" in row:
+            detail += f" kill={row['kill']}"
+        if "workdir_removed" in row:
+            detail += f" workdir_removed={row['workdir_removed']}"
+        click.echo(detail)
+
+
+# =============================================================================
+# Doctor (host readiness)
+# =============================================================================
+
+
+@main.command("doctor")
+def doctor():
+    """Check whether this host is ready to launch DOSBox-X sessions.
+
+    Reports whether a dosbox-x binary can be found and appears to have
+    remote debugging compiled in, the host's CPU count as a rough
+    concurrency ceiling, whether the session registry directory is
+    writable, and any orphaned sessions already registered. This is a fast
+    readiness check -- it never starts an emulator.
+    """
+    report = doctor_module.run()
+    click.echo(report.render())
 
 
 # =============================================================================
