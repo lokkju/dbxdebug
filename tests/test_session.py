@@ -10,8 +10,12 @@ so they are kept to the minimum that proves `start()`/`stop()` actually work
 end to end -- Task 11 adds the thorough live suite.
 """
 
+import contextlib
 import json
 import os
+import signal
+import subprocess
+import sys
 import time
 
 import pytest
@@ -165,6 +169,89 @@ def test_connect_with_retry_reraises_incompatible_stub_immediately():
     # No 0.25s retry sleep and no waiting out the 30s deadline: one call, fast.
     assert time.time() - start < 1.0
     assert calls == 1
+
+
+# --------------------------------------------------------------------------
+# process-group sweep: a child that outlives its leader must still die
+# --------------------------------------------------------------------------
+
+
+def test_kill_process_sweeps_a_child_that_outlives_its_leader(tmp_path):
+    """`kill_group(pid=...)` checks only the LEADER's liveness, never the group.
+
+    A child the leader forked, that ignores SIGTERM and keeps running after
+    the leader itself has been killed and reaped, would otherwise survive
+    `_kill_process` entirely: `kill_group` reports the leader gone the
+    moment it dies, without the process group ever being probed again. This
+    builds that scenario directly, with no emulator involved -- a leader
+    process with the default SIGTERM disposition (dies immediately) that
+    forks a child which installs `SIG_IGN` for SIGTERM and sleeps well past
+    this test's own bound. `_kill_process`'s sweep after `kill_group` is
+    what has to catch that straggler.
+
+    The child signals its own readiness by touching `ready_marker` right
+    after installing `SIG_IGN`, and the test waits (bounded) for that file
+    rather than guessing a sleep: sending the group's SIGTERM before the
+    freshly-forked child has actually installed its handler is a real race
+    -- caught empirically while writing this test, where the child still had
+    its default (inherited) disposition for a few milliseconds after
+    `os.fork()` and so died right along with the leader, making the sweep
+    look unnecessary when it was really just outrunning the setup.
+
+    Only ever signals the process group this test itself spawned
+    (`start_new_session=True` guarantees a fresh, dedicated pgid), and a
+    `finally` force-kills that same group so a failing assertion cannot
+    leave the child running.
+    """
+    ready_marker = tmp_path / "child_ready"
+    leader_script = (
+        "import os, signal, sys, time\n"
+        f"ready_marker = {str(ready_marker)!r}\n"
+        "child_pid = os.fork()\n"
+        "if child_pid == 0:\n"
+        "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "    open(ready_marker, 'w').close()\n"
+        "    time.sleep(30)\n"
+        "    os._exit(0)\n"
+        "else:\n"
+        "    sys.stdout.write(str(child_pid) + chr(10))\n"
+        "    sys.stdout.flush()\n"
+        "    time.sleep(30)\n"  # default SIGTERM disposition: dies at once on SIGTERM
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", leader_script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        start_new_session=True,
+    )
+    pgid = os.getpgid(proc.pid)
+    assert proc.stdout is not None  # requested via stdout=subprocess.PIPE above
+    try:
+        child_pid = int(proc.stdout.readline().strip())
+        assert proc.poll() is None  # leader is up and blocked on its own sleep
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not ready_marker.exists():
+            time.sleep(0.01)
+        assert ready_marker.exists(), "child never installed SIG_IGN in time"
+
+        session = DosboxSession(term_timeout=2.0)
+        session.proc = proc
+        session._kill_process()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and _pid_alive(child_pid):
+            time.sleep(0.05)
+        assert not _pid_alive(child_pid)
+        assert not _pid_alive(proc.pid)
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=2.0)
+        if proc.stdout is not None:
+            proc.stdout.close()
 
 
 # --------------------------------------------------------------------------

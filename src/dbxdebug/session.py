@@ -724,9 +724,9 @@ class DosboxSession:
     def _kill_process(self) -> None:
         """Kill the emulator's process group via `registry.kill_group`, then reap it.
 
-        Delegates the SIGTERM-then-SIGKILL escalation to `kill_group`
-        instead of duplicating it here: a hand-rolled version that only
-        catches `ProcessLookupError` on its first `killpg` lets a
+        Delegates the SIGTERM-then-SIGKILL escalation for the LEADER to
+        `kill_group` instead of duplicating it here: a hand-rolled version
+        that only catches `ProcessLookupError` on its first `killpg` lets a
         `PermissionError` propagate out of `stop()` -- and `stop()` runs
         from `__exit__`, where a newly raised exception would mask whatever
         exception the `with` block was already unwinding for. `kill_group`
@@ -734,14 +734,27 @@ class DosboxSession:
         It has no `Popen` handle to reap the zombie with, though, so that
         part is still done here.
 
-        `pid=proc.pid` is passed through so `kill_group` checks liveness
-        with `_pid_alive` (which treats a zombie as dead) instead of probing
-        the process group with `killpg(pgid, 0)` (which does not: a child
-        we have not yet `wait()`-ed on still answers signal 0 as "alive"
-        even after it has exited). Without `pid=`, `kill_group` would see
-        "alive" for the entire `term_timeout` -- and then the whole second,
-        5s "is it stuck" window on top of that -- every single time, since
-        nothing reaps the zombie until the `proc.wait()` below runs.
+        `pid=proc.pid` is passed through so `kill_group` checks the LEADER's
+        liveness with `_pid_alive` (which treats a zombie as dead) instead
+        of probing the whole process group with `killpg(pgid, 0)` (which
+        does not: a child we have not yet `wait()`-ed on still answers
+        signal 0 as "alive" even after it has exited). Without `pid=`,
+        `kill_group` would see "alive" for the entire `term_timeout` -- and
+        then the whole second, 5s "is it stuck" window on top of that --
+        every single time, since nothing reaps the zombie until the
+        `proc.wait()` below runs.
+
+        That `pid=` speedup has a real cost, though: `kill_group` then
+        checks ONLY the leader, never the group. A child that forks off the
+        leader, ignores SIGTERM, and outlives it is invisible to that check
+        -- `kill_group` would report `"gone"` the moment the (already-dead)
+        leader's zombie satisfies `_pid_alive`, without ever having sent the
+        group a signal at all, leaving that child running. The explicit
+        group-wide sweep below is what the hand-rolled version this method
+        replaced did unconditionally, and it is why: after the leader is
+        both killed AND reaped (so its own zombie cannot make `killpg(pgid,
+        0)` falsely report the group as still alive), anything left
+        answering in the group gets one unconditional `SIGKILL`.
         """
         if self.proc is None:
             return
@@ -755,7 +768,19 @@ class DosboxSession:
             proc.wait()
             return
         kill_group(pgid, self.term_timeout, pid=proc.pid)
-        proc.wait()
+        proc.wait()  # reap the leader BEFORE the group probe below
+        # A child that ignored SIGTERM can outlive its leader in the same
+        # process group -- `kill_group(pid=...)` above deliberately checks
+        # only the leader, not the group, so this sweep is what catches
+        # that straggler. `ProcessLookupError` (nothing left) is the normal
+        # case; `PermissionError` is swallowed rather than raised, since
+        # this runs from `stop()`, which runs from `__exit__`.
+        try:
+            os.killpg(pgid, 0)
+        except (ProcessLookupError, PermissionError):
+            return
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, signal.SIGKILL)
 
     def _cleanup_workdir(self) -> None:
         """Remove the workdir this session owns, unless told to keep it."""
