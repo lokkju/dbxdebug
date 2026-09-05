@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.4.0](https://github.com/lokkju/dbxdebug/compare/v0.3.0...v0.4.0) (2026-09-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* **session:** DosboxSession now runs the emulator headless by default. A caller that relied on seeing the window -- to watch the guest while debugging, or to drive it by hand -- must now pass headless=False explicitly. Everything else is unaffected: the debug surface is identical headless, and screen capture was verified byte-identical between the two modes. Note also that `headless` sits mid-dataclass, so positional construction past `connect=` shifts.
+
+### Features
+
+* **session:** add DosboxSession(headless=True), on by default ([8af1f56](https://github.com/lokkju/dbxdebug/commit/8af1f56528977c2dbc4a2ddec442f4aa6f76933d)), closes [#3](https://github.com/lokkju/dbxdebug/issues/3)
+* **session:** add read_bulk, a one-call bulk memory read ([f8e228b](https://github.com/lokkju/dbxdebug/commit/f8e228b101b14e682e3b4ec98b434f1fd7e5e7c7)), closes [#9](https://github.com/lokkju/dbxdebug/issues/9)
+
+
+### Bug Fixes
+
+* **ci:** unblock publishing and add a recovery path for a failed one ([9c69a87](https://github.com/lokkju/dbxdebug/commit/9c69a87c73f30b0a249e1bd5ec3c4cc4f2af0736))
+* **gdb:** bound reads and resynchronise the packet stream ([5940242](https://github.com/lokkju/dbxdebug/commit/5940242035181668c4d35e61db56d5b2342aa620))
+* **session:** record that headless is now the default ([d649d70](https://github.com/lokkju/dbxdebug/commit/d649d705bb46261d38c30a23fc9c39bd390f7c87))
+* **video,cli:** let a GDB client be borrowed instead of reopened ([bb9d351](https://github.com/lokkju/dbxdebug/commit/bb9d35170283407f9c7fbd64f4cfd4f1d75f1d64))
+
+
+### Performance Improvements
+
+* **clients:** set TCP_NODELAY, and correct what read_bulk is now worth ([c535e3b](https://github.com/lokkju/dbxdebug/commit/c535e3bafe2799e708714e4f771046fd35a55d81))
+
+
+### Documentation
+
+* correct the hazard write-ups now that the GDB stream is fixed ([a1821aa](https://github.com/lokkju/dbxdebug/commit/a1821aa8904987afd73ad1ba97d022fee5e30213)), closes [#4](https://github.com/lokkju/dbxdebug/issues/4) [#5](https://github.com/lokkju/dbxdebug/issues/5)
+* **migration:** fix the gaps a real migration hit ([96ffaa7](https://github.com/lokkju/dbxdebug/commit/96ffaa7a901a35529e14a81828f8a36d550664d9))
+
 ## [0.3.0](https://github.com/lokkju/dbxdebug/compare/v0.2.1...v0.3.0) (2026-09-05)
 
 
