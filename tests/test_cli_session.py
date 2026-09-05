@@ -154,9 +154,16 @@ class _FakeSocket:
     def __init__(self, chunks: list[bytes]) -> None:
         self._chunks = list(chunks)
         self.sent: list[bytes] = []
+        self._timeout: float | None = None
 
     def connect(self, address):
         pass
+
+    def settimeout(self, timeout: float | None) -> None:
+        self._timeout = timeout
+
+    def gettimeout(self) -> float | None:
+        return self._timeout
 
     def sendall(self, data: bytes) -> None:
         self.sent.append(data)

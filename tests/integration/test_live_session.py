@@ -7,11 +7,14 @@ breakpoint above 64 KB really fires, that `memdump` really refuses while the
 CPU runs, and that `frames.steps_out` really stops after a 16-bit epilogue's
 `ret` rather than on it.
 
-Three of them are about the wire itself. `GDBClient` assumes strict
-request/response and never resynchronises, so the last three tests pin down
-where that assumption holds and, for the two known ways it breaks, what the
-client does TODAY -- which is not what it should do. See their docstrings,
-and lokkju/dbxdebug#4 and #5.
+Four of them are about the wire itself. The wire is not a strict
+request/response alternation -- an unrequested stop reply or an abandoned
+reply breaks it -- so the last four tests pin down the control case where the
+alternation does hold, the two known ways it breaks, and the read timeout
+that bounds a request the stub will never answer. Two of them asserted the
+old, broken behaviour until the framing rework landed; their docstrings say
+what changed. Fake-socket coverage of the same paths, including the ones a
+live emulator will not produce on demand, is in `tests/test_gdb_framing.py`.
 
 Every test gets its OWN emulator, launched and torn down by the fixtures in
 `conftest.py`. They are marked `integration` and are excluded from the
@@ -146,6 +149,11 @@ BDA_LENGTH = 8
 # A socket timeout no localhost round-trip can meet, used to abandon a reply
 # on purpose. Not zero -- zero would put the socket in non-blocking mode.
 IMPOSSIBLE_SOCKET_TIMEOUT = 0.0005
+
+# Wall seconds allowed for a request the stub genuinely will not answer. Long
+# enough that a slow-but-alive stub is not mistaken for a silent one, short
+# enough that the test does not sit on the package's 30s default.
+UNANSWERED_REQUEST_TIMEOUT = 3.0
 
 # `DosboxSession.boot_settle` defaults to 2.5s so that a caller reading the
 # guest's SCREEN right after `start()` cannot capture the DOSBox-X boot
@@ -451,23 +459,24 @@ def test_steps_out_returns_past_a_real_16_bit_ret(
     assert (after["esp"] & 0xFFFF) == frame_bp + 4, "SP did not clear the return-address slot"
 
 
-def test_unsolicited_stop_reply_from_break_on_exec_desyncs_the_client(
+def test_unsolicited_stop_reply_from_break_on_exec_is_queued_not_read_as_a_reply(
     make_session: Callable[..., DosboxSession], tmp_path: Path
 ) -> None:
-    """Arming QMP break-on-exec while free-running breaks the GDB connection.
+    """An unrequested `S05` is queued, and the next read still gets its own bytes.
 
     `DEBUG_CheckExecuteBreakpoint` arms AND immediately activates a
     breakpoint at the next program's entry point, regardless of whether the
     GDB client asked to continue. When it hits, the stub sends a `$S05#b8`
-    that nothing requested. `GDBClient` assumes strict request/response, so
-    its next `_send_packet` reads that `$` where it expects the `+` ACK for
-    its own packet, and raises.
+    that nothing requested, and it lands exactly where the client's next
+    packet expects its `+` ACK.
 
-    THIS ASSERTS A DEFECT, NOT A CONTRACT. Documenting today's behaviour is
-    the point: the client should resynchronise instead (lokkju/dbxdebug#4,
-    with #5 for the timeout half of the same gap). When that lands, this
-    test starts failing loudly -- rewrite it then to assert the recovery, do
-    not re-pin it to whatever the fixed client happens to raise.
+    THIS ASSERTED A DEFECT AND NOW ASSERTS THE CONTRACT. It used to require
+    `ConnectionError: Failed to receive ACK. Got: b'$'` -- after which every
+    later call chewed one more byte off the stream -- because that was what
+    the client did. What it requires now: the stop reply is diverted to
+    `pending_stops`, the `m` that follows is answered with the ROM bytes it
+    actually asked for, the connection stays usable for the read after that,
+    and `take_pending_stops` hands the stop to the caller exactly once.
     """
     drive = tmp_path / "c"
     drive.mkdir()
@@ -485,8 +494,8 @@ def test_unsolicited_stop_reply_from_break_on_exec_desyncs_the_client(
 
     # Wait for the break to actually fire before touching GDB at all, so the
     # unsolicited reply is already buffered when the client next speaks --
-    # rather than racing it mid-exchange, where the same defect surfaces as
-    # an undecodable payload instead. QMP is a separate connection, so
+    # rather than racing it mid-exchange, where it lands where a PAYLOAD was
+    # expected instead of where an ACK was. QMP is a separate connection, so
     # polling it does not disturb the GDB stream.
     deadline = time.time() + BREAK_ON_EXEC_TIMEOUT
     while time.time() < deadline and qmp.query_status()["running"]:
@@ -496,15 +505,18 @@ def test_unsolicited_stop_reply_from_break_on_exec_desyncs_the_client(
         f"the guest's {EXEC_LOOP_NAME} loop may not be running"
     )
 
-    with pytest.raises(ConnectionError):
-        gdb.read_memory(BIOS_RESET_VECTOR, len(BIOS_RESET_BYTES))
+    assert gdb.read_memory(BIOS_RESET_VECTOR, len(BIOS_RESET_BYTES)) == BIOS_RESET_BYTES
+    assert gdb.read_memory(BDA_ADDRESS, BDA_LENGTH) != BIOS_RESET_BYTES
+    assert gdb.read_memory(BIOS_RESET_VECTOR, len(BIOS_RESET_BYTES)) == BIOS_RESET_BYTES
+
+    # The stop really happened, so it must reach the caller rather than being
+    # silently dropped -- and exactly once.
+    stops = gdb.take_pending_stops()
+    assert stops, "the unsolicited stop reply was swallowed instead of queued"
+    assert all(stop.startswith(b"S") or stop.startswith(b"T") for stop in stops), stops
+    assert gdb.take_pending_stops() == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="GDBClient never resynchronises after a timed-out request: the "
-    "abandoned reply is handed to the next request instead. lokkju/dbxdebug#5",
-)
 def test_a_timed_out_request_does_not_shift_every_later_reply(
     make_session: Callable[..., DosboxSession],
 ) -> None:
@@ -512,15 +524,16 @@ def test_a_timed_out_request_does_not_shift_every_later_reply(
 
     This is the second, quieter way to reproduce the symptom `frames.py`
     records. The socket timeout is squeezed below any possible round-trip,
-    so the reply to the 16-byte ROM read is abandoned unread. The next
-    request sends its own packet, consumes the ABANDONED request's ACK, and
-    reads the ABANDONED request's payload: 16 bytes of ROM where 8 bytes of
-    BIOS data area were asked for. Nothing ever puts the stream back, and
-    nothing reports it -- the caller just gets someone else's bytes.
+    so the reply to the 16-byte ROM read is abandoned unread. The client
+    used to send its next packet, consume the ABANDONED request's ACK, and
+    read the ABANDONED request's payload: 16 bytes of ROM where 8 bytes of
+    BIOS data area were asked for, with nothing putting the stream back and
+    nothing reporting it.
 
-    Expected to FAIL today, hence `xfail(strict=True)`: when the client
-    learns to resynchronise this becomes an XPASS, which strict mode reports
-    as a failure. That is the signal to delete the marker, not to relax it.
+    It now drains exactly what the abandoned exchange still owes before
+    sending anything else, so the next request is answered with its own
+    bytes. This test was `xfail(strict=True)` for as long as that was not
+    true; the marker is gone because it genuinely passes.
     """
     gdb, _ = clients(make_session(boot_settle=NO_BOOT_SETTLE))
     assert gdb.sock is not None
@@ -536,3 +549,35 @@ def test_a_timed_out_request_does_not_shift_every_later_reply(
     gdb.sock.settimeout(original_timeout)
 
     assert gdb.read_memory(BDA_ADDRESS, BDA_LENGTH) == baseline
+    # Not just the first read after the timeout: the stream is back in step
+    # for good, and both lengths still come back where they belong.
+    assert gdb.read_memory(BIOS_RESET_VECTOR, len(BIOS_RESET_BYTES)) == BIOS_RESET_BYTES
+    assert gdb.read_memory(BDA_ADDRESS, BDA_LENGTH) == baseline
+
+
+def test_the_default_timeout_bounds_a_request_the_stub_will_not_answer(
+    make_session: Callable[..., DosboxSession],
+) -> None:
+    """`qmp.stop()` then a GDB request fails with a diagnostic, not a deadlock.
+
+    While the emulator is QMP-stopped the GDB stub is not serviced at all --
+    it is polled from the emulation thread -- so this exact pair used to hang
+    the caller forever with nothing to read. The client now carries a read
+    timeout of its own, so it raises and names the packet that went
+    unanswered. A short explicit timeout keeps the test quick; the point
+    being proven is that the bound exists and is honoured, not its default.
+    """
+    session = make_session(boot_settle=NO_BOOT_SETTLE)
+    gdb, qmp = clients(session)
+    assert gdb.sock is not None
+    assert gdb.read_memory(BIOS_RESET_VECTOR, len(BIOS_RESET_BYTES)) == BIOS_RESET_BYTES
+
+    qmp.stop()
+    gdb.sock.settimeout(UNANSWERED_REQUEST_TIMEOUT)
+    try:
+        with pytest.raises(TimeoutError) as caught:
+            gdb.read_memory(BIOS_RESET_VECTOR, len(BIOS_RESET_BYTES))
+    finally:
+        qmp.cont()
+
+    assert "mffff0" in str(caught.value), caught.value
