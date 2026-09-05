@@ -7,6 +7,13 @@ breakpoint above 64 KB really fires, that `memdump` really refuses while the
 CPU runs, and that `frames.steps_out` really stops after a 16-bit epilogue's
 `ret` rather than on it.
 
+Four of them are about the bulk-read path, which is the biggest performance
+difference this package makes and the one thing a fake cannot establish:
+`session.read_bulk` returns exactly what a loop of `gdb.read_memory` returns,
+it is dramatically faster than that loop, it puts the run state back the way
+it found it, and the refusal a running CPU produces reaches the caller naming
+the fix.
+
 Four of them are about the wire itself. The wire is not a strict
 request/response alternation -- an unrequested stop reply or an abandoned
 reply breaks it -- so the last four tests pin down the control case where the
@@ -42,7 +49,7 @@ import pytest
 from dbxdebug.addressing import linear
 from dbxdebug.frames import steps_out, walk_frames
 from dbxdebug.gdb import GDBClient
-from dbxdebug.qmp import QMPClient, QMPError
+from dbxdebug.qmp import CpuNotStoppedError, QMPClient, QMPError
 from dbxdebug.session import DosboxSession
 
 pytestmark = pytest.mark.integration
@@ -66,6 +73,23 @@ FIRST_64K = 0x10000
 # The two vendor capabilities this package's correctness depends on.
 LINEAR_BP_CAPABILITY = "dosbox-x-linear-bp+"
 EIP_OFFSET_CAPABILITY = "dosbox-x-eip-offset+"
+
+# One 64 KB real-mode segment of BIOS ROM: big enough for the bulk-read win
+# to be unmistakable, and reachable before the guest has booted. NOT stable
+# over time -- DOSBox-X installs callback stubs into it during boot -- so any
+# comparison against it must be taken at a single halt.
+ROM_SEGMENT_BASE = 0xF0000
+ROM_SEGMENT_LENGTH = 0x10000
+
+# Chunk size for the `gdb.read_memory` arm of the comparison. A round-trip
+# costs the same at any size here, so this is chosen to keep the loop's
+# wall time reasonable, not to flatter it.
+GDB_CHUNK = 0x400
+
+# How much faster the bulk path must be before the timing test passes.
+# Measured 42x; asserted at a fraction of that, so this fails only if the
+# bulk read has stopped being a bulk read.
+MIN_BULK_SPEEDUP = 5
 
 # What a booted guest shows once autoexec has switched to the mounted drive.
 DOS_PROMPT = "C:\\>"
@@ -296,6 +320,116 @@ def test_memdump_refuses_while_the_cpu_is_running(
         qmp.memdump(BIOS_RESET_VECTOR, 16)
 
     assert "stopped" in str(caught.value)
+
+
+def test_read_bulk_matches_a_gdb_read_loop_and_restores_the_run_state(
+    make_session: Callable[..., DosboxSession],
+) -> None:
+    """One `read_bulk` returns what a loop of `gdb.read_memory` returns, and leaves the CPU running.
+
+    Both halves matter. A fast path that returns different bytes is
+    worthless, and a helper that silently leaves the CPU halted is its own
+    trap -- the caller asked for a read, not for a pause.
+
+    The comparison is made against the SAME halt, not against an earlier
+    dump: F000 is ROM to the guest, but DOSBox-X writes its callback stubs
+    (`fe 38`) into that segment while the BIOS and DOS install handlers, so
+    two dumps seconds apart legitimately differ. Measured: 93 bytes of this
+    segment changed over three seconds of early boot.
+    """
+    session = make_session(boot_settle=NO_BOOT_SETTLE)
+    gdb, qmp = clients(session)
+    assert qmp.query_status()["running"] is True
+
+    bulk = session.read_bulk(ROM_SEGMENT_BASE, ROM_SEGMENT_LENGTH)
+
+    # Restored: `read_bulk` found it running and left it running.
+    assert qmp.query_status()["running"] is True
+    assert len(bulk) == ROM_SEGMENT_LENGTH
+
+    gdb.halt()
+    looped = b"".join(
+        gdb.read_memory(ROM_SEGMENT_BASE + off, GDB_CHUNK)
+        for off in range(0, ROM_SEGMENT_LENGTH, GDB_CHUNK)
+    )
+    again = session.read_bulk(ROM_SEGMENT_BASE, ROM_SEGMENT_LENGTH)
+    gdb.resume()
+
+    assert again == looped, "the bulk read and the GDB read loop disagree"
+
+
+def test_read_bulk_leaves_an_already_halted_cpu_halted(
+    make_session: Callable[..., DosboxSession],
+) -> None:
+    """A CPU the caller stopped stays stopped: `read_bulk` resumes only what IT halted."""
+    session = make_session(boot_settle=NO_BOOT_SETTLE)
+    gdb, qmp = clients(session)
+    gdb.halt()
+    assert qmp.query_status()["debug"]["paused"] is True
+
+    session.read_bulk(BIOS_RESET_VECTOR, 16)
+
+    assert qmp.query_status()["debug"]["paused"] is True
+    gdb.resume()
+
+
+def test_read_bulk_is_dramatically_faster_than_the_same_read_through_gdb(
+    make_session: Callable[..., DosboxSession],
+) -> None:
+    """The reason this helper exists, asserted rather than asserted-to-be-true-in-a-comment.
+
+    Recorded on this build: 0.124 s for one 64 KB segment through
+    `read_bulk` -- status query, halt and resume included -- against 5.25 s
+    for the same bytes through 64 one-kilobyte `gdb.read_memory` calls, a
+    factor of 42. A GDB round-trip costs about 82 ms here regardless of its
+    size, because the stub is polled from the emulation thread, so the trip
+    count is the whole cost.
+
+    The bound asserted is deliberately far below what was measured: this is
+    a guard against the bulk path quietly degenerating into a loop, not a
+    benchmark with a pass mark.
+    """
+    session = make_session(boot_settle=NO_BOOT_SETTLE)
+    gdb, _qmp = clients(session)
+
+    started = time.time()
+    bulk = session.read_bulk(ROM_SEGMENT_BASE, ROM_SEGMENT_LENGTH)
+    bulk_secs = time.time() - started
+
+    gdb.halt()
+    started = time.time()
+    looped = b"".join(
+        gdb.read_memory(ROM_SEGMENT_BASE + off, GDB_CHUNK)
+        for off in range(0, ROM_SEGMENT_LENGTH, GDB_CHUNK)
+    )
+    loop_secs = time.time() - started
+    gdb.resume()
+
+    assert len(bulk) == len(looped) == ROM_SEGMENT_LENGTH
+    detail = f"bulk read took {bulk_secs:.3f}s against {loop_secs:.3f}s for the GDB loop"
+    assert bulk_secs * MIN_BULK_SPEEDUP < loop_secs, detail
+
+
+def test_memdump_while_running_names_the_fix_rather_than_only_the_refusal(
+    make_session: Callable[..., DosboxSession],
+) -> None:
+    """The raw stub refusal reaches the caller wrapped in what to do instead.
+
+    The stub offers two remedies and one is a trap: a QMP `stop` does make
+    the dump legal, and it parks the emulation thread that services the GDB
+    stub, so every GDB request after it goes unanswered. Only the wrapper
+    can say that -- the stub does not know who is asking.
+    """
+    session = make_session(boot_settle=NO_BOOT_SETTLE)
+    _gdb, qmp = clients(session)
+
+    with pytest.raises(CpuNotStoppedError) as caught:
+        qmp.memdump(BIOS_RESET_VECTOR, 16)
+
+    message = str(caught.value)
+    assert "stopped" in message
+    assert "read_bulk" in message
+    assert "qmp.stop()" in message
 
 
 def test_wait_for_text_observes_the_prompt(make_session: Callable[..., DosboxSession]) -> None:

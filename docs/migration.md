@@ -334,6 +334,7 @@ were two loops was the first item of lokkju/dbxdebug#7.
 | `query_status() -> dict` | `query_status() -> dict` | **Returns the `return` payload, not the envelope**: `resp["return"]["running"]` becomes `status["running"]` |
 | `stop()`, `cont()`, `debug_break_on_exec(enabled)` | Same names | Same unwrapping change as `query_status` |
 | -- | `memdump`, `screendump`, `savestate`, `loadstate`, `system_reset`, `quit` | New. `quit` is accepted but does not quit the emulator, and is not listed by `query_commands()` |
+| -- | `CpuNotStoppedError` | New. A `QMPError` subclass raised when `memdump` is refused for a running CPU; the message names the fix. Prefer `DosboxSession.read_bulk`, which cannot hit it |
 | `QMPError` | `QMPError` | Same name, different module |
 
 ## 4. The capability handshake
@@ -392,9 +393,12 @@ Pass `timeout=None` for the old unbounded blocking, deliberately.
 The interaction that made this easy to hit is unchanged: while the emulator is
 QMP-stopped, the GDB stub does not answer at all (it is polled from the
 emulation thread). So `qmp.stop()` followed by any GDB request cannot be
-served -- it now fails with the message above rather than deadlocking. Read
-memory with `qmp.memdump`, which does work while QMP-stopped, or halt over GDB
-with `gdb.halt()` instead of stopping over QMP.
+served -- it now fails with the message above rather than deadlocking. To read
+memory, call `session.read_bulk(address, length)`, which halts over GDB,
+dumps and puts the run state back; otherwise halt with `gdb.halt()` rather
+than stopping over QMP. A `memdump` refused because the CPU is running now
+raises `CpuNotStoppedError` (a `QMPError` subclass) carrying that advice,
+not just the stub's refusal.
 
 A consumer that armed `session.gdb.sock.settimeout(30.0)` itself after
 `start()` can keep doing so: nothing caches the timeout, and every read

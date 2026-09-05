@@ -54,7 +54,7 @@ from .keyboard import (
     number_keys,
     shift_key,
 )
-from .qmp import QMPClient, QMPError
+from .qmp import CpuNotStoppedError, QMPClient, QMPError
 from .utils import hexdump, parse_x86_address
 from .video import (
     BDA_TIMER_TICK,
@@ -75,6 +75,7 @@ __all__ = [
     "GDBClient",
     "QMPClient",
     "QMPError",
+    "CpuNotStoppedError",
     # Video tools
     "DOSVideoTools",
     "decode_text_screen",

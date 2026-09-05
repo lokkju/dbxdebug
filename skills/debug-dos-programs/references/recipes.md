@@ -175,19 +175,31 @@ session.set_breakpoint(0x1000, 0x0020)
 scan cost 7,168 round-trips before this was understood.
 
 ```python
-gdb.halt()                              # memdump REQUIRES a stopped CPU
-data = qmp.memdump(0xFFEF0, 0x110)      # -> bytes, 16 MB server-side cap
+data = session.read_bulk(0xF0000, 0x10000)   # -> 65536 bytes, one round-trip
 assert isinstance(data, bytes)
 ```
 
-`memdump` reads guest memory off the QMP socket thread, so DOSBox-X refuses it
-outright while the guest runs rather than risk a torn read — you get a
-`QMPError` mentioning "stopped".
+Measured on this build: **0.124 s** for that 64 KB — status query, halt and
+resume included — against **5.25 s** for the same bytes through 64
+one-kilobyte `gdb.read_memory` calls. A GDB round-trip costs about **82 ms**
+here whatever its size, so the trip count is the whole cost. Both paths return
+identical bytes.
+
+`read_bulk` halts through GDB, dumps, and resumes. A CPU that was **already**
+stopped — a breakpoint, the interactive debugger, or a QMP stop — is left
+stopped: it resumes only what it halted itself.
+
+Driving `qmp.memdump` by hand means holding two rules yourself. `memdump`
+reads guest memory off the QMP socket thread, so DOSBox-X refuses it outright
+while the guest runs rather than risk a torn read — you get
+`CpuNotStoppedError`, a `QMPError` subclass whose message names the fix.
 
 **Halt with `gdb.halt()`, not `qmp.stop()`,** if you will also talk GDB: while
 the emulator is QMP-stopped the GDB stub does not answer at all, so every GDB
 request in that combination burns the read timeout and raises
-`GDBTimeoutError`.
+`GDBTimeoutError`. Put the CPU back with `gdb.resume()` — `continue_execution()`
+blocks until the next stop reply, which never comes if nothing is armed to
+produce one.
 
 Server-side file variant, for a dump you do not want on the wire:
 

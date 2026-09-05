@@ -86,9 +86,30 @@ Useful `DosboxSession` arguments: `mounts={"c": path}`, `program=` and
 `conf=` for your own conf template, `cycles=`, `connect=False` for the handle
 without clients, `boot_settle=` (default 2.5s -- the debug ports accept long
 before the guest reaches a prompt), and `label=` to name the scratch workdir.
-Conveniences on the handle: `screen_lines()`, `wait_for_text()`,
-`assert_screen_readable()`, `running`, `set_breakpoint()`,
-`remove_breakpoint()`.
+Conveniences on the handle: `screen_lines()`, `read_bulk()`,
+`wait_for_text()`, `assert_screen_readable()`, `running`,
+`set_breakpoint()`, `remove_breakpoint()`.
+
+### Reading a region: `session.read_bulk(address, length)`
+
+One QMP `memdump` reply instead of thousands of GDB `m` round-trips.
+Measured on this build, one 64 KB segment: **0.124 s** through
+`read_bulk` against **5.25 s** through 64 one-kilobyte `gdb.read_memory`
+calls -- 42x, and the gap widens with the region, because a GDB
+round-trip costs about 82 ms here whatever its size. Both paths return
+identical bytes; the live suite asserts it.
+
+```python
+data = session.read_bulk(0xF0000, 0x10000)   # -> 65536 bytes
+```
+
+It exists because the raw sequence has two traps. `memdump` is refused
+while the CPU runs, and the obvious way to stop it -- `qmp.stop()` --
+parks the emulation thread that services the GDB stub, so the dump
+succeeds and every later GDB request goes unanswered. `read_bulk` halts
+through GDB, dumps, and resumes. If the CPU was ALREADY stopped (a
+breakpoint, the interactive debugger, or a QMP stop) it takes the dump
+and leaves it stopped: it resumes only what it halted itself.
 
 ## Addressing -- read this once
 
@@ -160,7 +181,7 @@ old build fails at `start()` rather than at the first breakpoint.
 |---|---|
 | `dbxdebug.session` | `DosboxSession` -- launch, connect, tear down. Also `DEFAULT_CONF`, `render_conf`, `DosboxLaunchError` |
 | `dbxdebug.gdb` | `GDBClient`, `IncompatibleStubError`, `REGISTER_NAMES` |
-| `dbxdebug.qmp` | `QMPClient`, `QMPError` -- keys, `memdump`, `screendump`, save/load state, `stop`/`cont`, `debug_break_on_exec` |
+| `dbxdebug.qmp` | `QMPClient`, `QMPError`, `CpuNotStoppedError` -- keys, `memdump`, `screendump`, save/load state, `stop`/`cont`, `debug_break_on_exec` |
 | `dbxdebug.addressing` | `linear`, `linear_pc`, `parse_address`, `bp_addr`, `PackedAddressError` |
 | `dbxdebug.frames` | `walk_frames`, `steps_out`, `Frame`, `FrameWalkError` |
 | `dbxdebug.registry` | `list_sessions`, `reap`, `format_table`, `free_port`, `kill_group` |
@@ -358,8 +379,11 @@ client with `GDBClient(timeout=...)`, or pass `timeout=None` for the old
 unbounded blocking. The underlying interaction is unchanged and still worth
 knowing: while the emulator is QMP-stopped the GDB stub is not serviced at
 all, so `qmp.stop()` followed by any GDB request cannot be answered. It now
-fails in 30 s with a message instead of deadlocking. Use `qmp.memdump` (which
-works while QMP-stopped) or `gdb.halt()` instead of stopping over QMP.
+fails in 30 s with a message instead of deadlocking. To read memory, reach
+for `session.read_bulk()`, which halts over GDB for you; otherwise halt
+with `gdb.halt()` rather than stopping over QMP. A `memdump` refused for
+this reason now raises `CpuNotStoppedError` (a `QMPError`) naming the fix,
+rather than surfacing the stub's refusal alone.
 
 **Stream desync: resynchronised, or refused** (was
 [#5](https://github.com/lokkju/dbxdebug/issues/5), fixed). Both triggers were
