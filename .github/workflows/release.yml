@@ -9,6 +9,18 @@ name: Release
 on:
   push:
     branches: [main]
+  # Recovery path. A tag/release created with GITHUB_TOKEN does not trigger a
+  # workflow, so a publish that fails for an environmental reason (a bad
+  # publisher/metadata pairing, a PyPI outage) cannot be retried by re-running
+  # the original run -- a re-run replays the workflow file from that commit,
+  # including whatever was broken. Dispatch this against the existing tag
+  # instead. It rebuilds from that tag and republishes; it never creates a tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish, e.g. v0.3.0"
+        required: true
+        type: string
 
 permissions: {}
 
@@ -18,6 +30,7 @@ concurrency:
 
 jobs:
   release-please:
+    if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release + tag
@@ -36,14 +49,14 @@ jobs:
   # If anything here fails, the publish job below is skipped and nothing ships.
   ci:
     needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    if: ${{ !cancelled() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
     permissions:
       contents: read
     uses: ./.github/workflows/test.yml
 
   publish:
     needs: [release-please, ci]
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    if: ${{ !cancelled() && needs.ci.result == 'success' && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -54,7 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.release-please.outputs.tag_name }}
           fetch-depth: 0 # Full history + tags for hatch-vcs version
 
       - name: Install uv and set up Python
@@ -66,9 +79,9 @@ jobs:
         run: uv build
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
 
       - name: Attach artifacts to the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" dist/* --clobber
+        run: gh release upload "${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.release-please.outputs.tag_name }}" dist/* --clobber
