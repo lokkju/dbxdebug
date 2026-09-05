@@ -193,18 +193,27 @@ simply never returns.
 
 **Common ways in.**
 
-- Pointing `dbxdebug mem` / `cpu` / `screen` at a session that already holds
-  its own GDB client. The CLI opens a client of its own.
-- `DOSVideoTools(host, port)` — it constructs its own `GDBClient` too.
+- Running `dbxdebug mem` / `cpu` / `screen` as a separate process against a
+  session that already holds its own GDB client. That process opens a client of
+  its own; nothing can hand it the session's.
+- `DOSVideoTools(host, port)` — asking for host/port constructs an owned
+  `GDBClient`.
 
-**Fix.**
+**Fix: lend the client you already have.**
 
-- Inside a session, drive `session.gdb`, and use `session.screen_lines()`
-  rather than `DOSVideoTools`.
-- If you want the CLI to be the one client, launch with
+- `DOSVideoTools(gdb=session.gdb)` borrows the session's client. The borrower
+  never closes it, so the session stays its owner (lokkju/dbxdebug#11). Passing
+  `gdb=` together with `host`/`port` raises `ValueError` rather than silently
+  connecting somewhere you did not ask for.
+- The `mem`, `cpu` and `screen` groups borrow the same way when driven
+  in-process: put the client in click's context object under
+  `dbxdebug.cli.GDB_CLIENT_KEY`, e.g.
+  `main(["screen", "show"], obj={GDB_CLIENT_KEY: session.gdb}, standalone_mode=False)`.
+- If you want the CLI *process* to be the one client, launch with
   `DosboxSession(connect=False)`.
-- Reserve `DOSVideoTools` for the standalone case where it owns the only
-  connection.
+- `session.screen_lines()` and `DOSVideoTools.screen_dump()` share one decode
+  (`video.decode_text_screen`), so either is fine — pick whichever client
+  ownership suits.
 
 QMP has no such restriction and is the right channel for anything that does
 not need the GDB stub.

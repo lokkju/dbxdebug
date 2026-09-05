@@ -63,6 +63,7 @@ from .video import (
     DOS_VIDEO_PAGE_TWO,
     TIMER_FREQUENCY,
     DOSVideoTools,
+    decode_text_screen,
     decode_vga_attribute,
     format_attribute_info,
 )
@@ -76,6 +77,7 @@ __all__ = [
     "QMPError",
     # Video tools
     "DOSVideoTools",
+    "decode_text_screen",
     "decode_vga_attribute",
     "format_attribute_info",
     "dos_video_to_html",

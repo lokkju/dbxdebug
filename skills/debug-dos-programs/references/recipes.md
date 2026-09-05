@@ -266,11 +266,25 @@ result = qmp.screendump()                    # base64 PNG inline in `return`
 result = qmp.screendump(file="/tmp/shot.png")  # written on the emulator's host
 ```
 
-**Do not** point `DOSVideoTools` at a session that already has a client: it
-opens its own `GDBClient`, and the stub serves one at a time, so the
-constructor blocks forever in `qSupported` (lokkju/dbxdebug#8). Same for the
-`dbxdebug screen` / `mem` / `cpu` CLI commands — launch with
-`DosboxSession(connect=False)` if you want the CLI to be the one client.
+**Lend the client, do not open a second one.** The stub serves one GDB client
+at a time, so a second connection blocks forever in `qSupported`
+(lokkju/dbxdebug#8). Inside a session, hand yours over:
+
+```python
+from dbxdebug.cli import GDB_CLIENT_KEY, main
+from dbxdebug.video import DOSVideoTools
+
+with DOSVideoTools(gdb=session.gdb) as video:  # borrowed; not closed here
+    lines = video.screen_dump()
+
+main(["screen", "show"], obj={GDB_CLIENT_KEY: session.gdb}, standalone_mode=False)
+```
+
+`DOSVideoTools(host, port)` — with no `gdb=` — still opens and owns its own
+client, which is right only when it is the sole client. Running the `dbxdebug
+screen` / `mem` / `cpu` commands as a separate process is always a second
+connection: launch with `DosboxSession(connect=False)` if you want that process
+to be the one client.
 
 Standalone (the CLI owns the only connection):
 

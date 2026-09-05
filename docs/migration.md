@@ -305,15 +305,19 @@ and both pass non-printables through as-is (only `0x00` becomes a space). A
 consumer comparing screen text against stored fixtures will see the
 difference.
 
-**`DOSVideoTools` opens its own GDB connection.** `DOSVideoTools(host, port)`
-constructs a `GDBClient` of its own. The emulator's stub serves one client at
-a time -- it only accepts a new connection while it has none -- so pointing
-`DOSVideoTools` at a session that already has a connected client gets a TCP
-connection the stub never services, and the constructor blocks in the
-`qSupported` handshake with no timeout (5.1). Inside a session, use
-`session.screen_lines()`; keep `DOSVideoTools` for the standalone case where
-it owns the only connection. That the two decode loops are duplicated at all
-is lokkju/dbxdebug#7.
+**`DOSVideoTools` owns or borrows its GDB connection.** `DOSVideoTools(host,
+port)` constructs a `GDBClient` of its own, which it closes. The emulator's
+stub serves one client at a time -- it only accepts a new connection while it
+has none -- so pointing a second one at a session that already has a connected
+client gets a TCP connection the stub never services, and the constructor
+blocks in the `qSupported` handshake with no timeout (5.1). Pass
+`DOSVideoTools(gdb=session.gdb)` to borrow the session's client instead; the
+borrower never closes what it did not open, so the session stays its owner.
+`gdb=` cannot be combined with `host`/`port` -- that raises `ValueError`
+rather than quietly ignoring the port you named (lokkju/dbxdebug#11).
+`session.screen_lines()` and `DOSVideoTools.screen_dump()` now share one
+decode, `video.decode_text_screen`, so they can no longer drift; that they
+were two loops was the first item of lokkju/dbxdebug#7.
 
 ### QMP
 

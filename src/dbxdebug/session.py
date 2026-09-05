@@ -104,6 +104,7 @@ from .registry import (
     port_is_listening,
     registry_dir,
 )
+from .video import decode_text_screen
 
 # `[sdl] output`. NOT `opengl`: measured back to back on an idle host,
 # `opengl` accumulates emulated time roughly 8.6x more slowly than `surface`
@@ -800,18 +801,26 @@ class DosboxSession:
         return self.proc is not None and self.proc.poll() is None
 
     def screen_lines(self, width: int = 80, height: int = 25) -> list[str]:
-        """Read the guest's VGA text screen through GDB.
+        """Read the guest's VGA text screen through this session's GDB client.
+
+        Reads video memory at linear address `0xB8000` -- the standard
+        text-mode framebuffer, page 0 -- and hands it to
+        `video.decode_text_screen`, the one decode path this package has.
+        This method used to carry its own copy of that loop, because
+        `DOSVideoTools` could not be given a client and so could not be
+        reached from here without opening a second one; both halves of
+        lokkju/dbxdebug#7's first item.
+
+        Errors from the read propagate. `DOSVideoTools.screen_dump`, which
+        returns `None` instead, is the other caller of the same decode.
 
         Args:
             width: Screen columns.
             height: Screen rows.
 
         Returns:
-            `height` strings of `width` characters each, decoded from video
-            memory at linear address `0xB8000` (the standard text-mode
-            framebuffer, page 0): two bytes per cell, character first, then
-            the attribute byte, which is discarded here. A cell holding 0x00
-            renders as a space.
+            `height` strings of `width` characters each. See
+            `video.decode_text_screen` for the cell encoding.
 
         Raises:
             RuntimeError: If no GDB client is connected (`connect=False`).
@@ -819,15 +828,7 @@ class DosboxSession:
         if self.gdb is None:
             raise RuntimeError("no GDB client (connect=False?)")
         memory = self.gdb.read_memory(0xB8000, width * height * 2)
-        lines = []
-        for row in range(height):
-            chars = []
-            for col in range(width):
-                idx = (row * width + col) * 2
-                byte = memory[idx] if idx < len(memory) else 0
-                chars.append(" " if byte == 0 else chr(byte))
-            lines.append("".join(chars))
-        return lines
+        return decode_text_screen(memory, width, height)
 
     def set_breakpoint(self, seg: int, off: int) -> bool:
         """Break at `seg:off`, translated to a LINEAR address.

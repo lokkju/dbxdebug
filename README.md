@@ -335,9 +335,12 @@ with QMPClient() as qmp:                       # localhost:4444
     qmp.send_key(CTRL_C)
     qmp.type_text("Hello World!")
 
-with DOSVideoTools() as video:
+with DOSVideoTools() as video:                 # owns its own client
     lines = video.screen_dump()
     lines, ticks = video.screen_dump_with_ticks()
+
+with DOSVideoTools(gdb=session.gdb) as video:  # borrows a session's client
+    lines = video.screen_dump()                # and never closes it
 ```
 
 ## Known hazards
@@ -375,11 +378,31 @@ it would look like it worked whether or not the stream had shifted.
 **One GDB client at a time**
 ([#8](https://github.com/lokkju/dbxdebug/issues/8)). The stub serves a single
 GDB client. A second one completes the TCP connect and then blocks forever in
-the `qSupported` handshake -- no refusal, no error, just a hang. In particular,
-pointing a `dbxdebug mem` / `cpu` / `screen` command at a session that already
-holds its own GDB client hangs that command. Use
-`DosboxSession(connect=False)` if you want the CLI to be the one client, or
-drive the session's own `session.gdb` from Python.
+the `qSupported` handshake -- no refusal, no error, just a hang. This is a
+stub limitation and is still open; what changed is that nothing in this
+package opens a competing connection behind your back any more
+([#11](https://github.com/lokkju/dbxdebug/issues/11)). Lend the session's
+client out instead of opening a second one:
+
+```python
+from dbxdebug.cli import GDB_CLIENT_KEY, main
+from dbxdebug.video import DOSVideoTools
+
+with DosboxSession(...) as session:
+    with DOSVideoTools(gdb=session.gdb) as video:   # borrowed, not reopened
+        lines = video.screen_dump()
+
+    # the CLI, driven in-process, borrows the same client
+    main(["screen", "show"], obj={GDB_CLIENT_KEY: session.gdb}, standalone_mode=False)
+```
+
+A borrowed client is never closed by the borrower -- the session stays its
+owner. `DOSVideoTools()` with no `gdb=` still builds and closes its own, which
+is the right thing when it is the only client, and so does a `dbxdebug` command
+run as a separate process. Running the CLI as a separate process against a
+session that holds its own client still hangs, because that is a second
+connection however it is spelled: use `DosboxSession(connect=False)` there, or
+drive the session's `session.gdb` from Python.
 
 QMP is a separate socket and is undisturbed by any of this, which is why
 `qmp.query_status()` is the way to learn that the CPU stopped.

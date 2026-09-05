@@ -6,10 +6,29 @@ Commands:
     dbxdebug cpu <command>     - CPU state and execution control (via GDB)
     dbxdebug key <command>     - Keyboard input (via QMP)
     dbxdebug screen <command>  - Screen capture and recording
+
+The `mem`, `cpu` and `screen` groups all talk GDB, and the DOSBox-X stub
+serves ONE GDB client at a time (lokkju/dbxdebug#8). Run as a standalone
+process that is fine -- the CLI is then the only client. Driven in-process by
+something that already holds a session, it is not: a second connection hangs
+in the `qSupported` exchange with no read timeout to end it. So these groups
+BORROW a client when one is handed to them in click's context object:
+
+    from click.testing import CliRunner
+    CliRunner().invoke(main, ["cpu", "regs"], obj={GDB_CLIENT_KEY: session.gdb})
+
+    # or, driving the group directly
+    main(["screen", "show"], obj={GDB_CLIENT_KEY: session.gdb}, standalone_mode=False)
+
+A borrowed client is never closed here; the session that opened it stays its
+owner. With no client in `obj`, each command builds and closes its own, which
+is the standalone behaviour and is unchanged (lokkju/dbxdebug#11).
 """
 
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import click
 from loguru import logger
@@ -28,6 +47,53 @@ from .video import DOSVideoTools
 # Configure loguru
 logger.remove()
 logger.add(sys.stderr, level="WARNING")
+
+# Key under which a caller driving the CLI in-process may place an
+# already-connected `GDBClient` in click's context object, for the GDB-backed
+# groups to borrow instead of opening a competing connection.
+GDB_CLIENT_KEY = "gdb_client"
+
+
+@contextmanager
+def _gdb_client(ctx) -> Iterator[GDBClient]:
+    """Yield a GDB client for one command: borrowed if supplied, else owned.
+
+    Args:
+        ctx: The click context whose `obj` may hold `GDB_CLIENT_KEY`.
+
+    Yields:
+        A connected `GDBClient`. One found under `GDB_CLIENT_KEY` is BORROWED
+        and left open on exit -- its owner closes it. Otherwise a client is
+        built from `gdb_host`/`gdb_port`, OWNED, and closed on exit.
+    """
+    borrowed = ctx.obj.get(GDB_CLIENT_KEY)
+    if borrowed is not None:
+        yield borrowed
+        return
+    with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+        yield gdb
+
+
+@contextmanager
+def _video_tools(ctx) -> Iterator[DOSVideoTools]:
+    """Yield video tools for one command over a borrowed or owned client.
+
+    Args:
+        ctx: The click context whose `obj` may hold `GDB_CLIENT_KEY`.
+
+    Yields:
+        A `DOSVideoTools`. It borrows a client found under `GDB_CLIENT_KEY`
+        and will not close it; otherwise it owns one built from
+        `gdb_host`/`gdb_port`. `DOSVideoTools.close` enforces that
+        distinction, so the `with` below is correct either way.
+    """
+    borrowed = ctx.obj.get(GDB_CLIENT_KEY)
+    if borrowed is not None:
+        video = DOSVideoTools(gdb=borrowed)
+    else:
+        video = DOSVideoTools(ctx.obj["gdb_host"], ctx.obj["gdb_port"])
+    with video:
+        yield video
 
 
 @click.group()
@@ -79,7 +145,7 @@ def mem_read(ctx, address: str, length: int, output_hex: bool):
         dbxdebug mem read 0x1000 256
     """
     try:
-        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+        with _gdb_client(ctx) as gdb:
             data = gdb.read_memory(address, length)
             if output_hex:
                 linear = parse_x86_address(address)
@@ -106,7 +172,7 @@ def mem_write(ctx, address: str, hexdata: str):
         dbxdebug mem write b800:0000 4142
     """
     try:
-        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+        with _gdb_client(ctx) as gdb:
             data = bytes.fromhex(hexdata)
             gdb.write_memory(address, data)
             click.echo(f"Wrote {len(data)} bytes to {address}")
@@ -136,7 +202,7 @@ def cpu(ctx, host: str, port: int):
 def cpu_regs(ctx):
     """Display all CPU registers."""
     try:
-        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+        with _gdb_client(ctx) as gdb:
             reg_list = gdb.read_register_list()
             regs = dict(zip(REGISTER_NAMES, reg_list, strict=True))
             pc = linear_pc(reg_list)
@@ -171,7 +237,7 @@ def cpu_break(ctx, address: str):
         dbxdebug cpu break 0x1000
     """
     try:
-        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+        with _gdb_client(ctx) as gdb:
             if gdb.set_breakpoint(address):
                 linear = parse_x86_address(address)
                 click.echo(f"Breakpoint set at 0x{linear:X}")
@@ -193,7 +259,7 @@ def cpu_delete(ctx, address: str):
         dbxdebug cpu delete 0x1000
     """
     try:
-        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+        with _gdb_client(ctx) as gdb:
             if gdb.remove_breakpoint(address):
                 linear = parse_x86_address(address)
                 click.echo(f"Breakpoint removed at 0x{linear:X}")
@@ -210,7 +276,7 @@ def cpu_delete(ctx, address: str):
 def cpu_step(ctx):
     """Execute single instruction and stop."""
     try:
-        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+        with _gdb_client(ctx) as gdb:
             response = gdb.step()
             click.echo(f"Stopped: {response.decode()}")
     except Exception as e:
@@ -223,7 +289,7 @@ def cpu_step(ctx):
 def cpu_cont(ctx):
     """Continue execution until breakpoint or Ctrl+C."""
     try:
-        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+        with _gdb_client(ctx) as gdb:
             click.echo("Continuing... (Ctrl+C to interrupt)")
             response = gdb.continue_execution()
             click.echo(f"Stopped: {response.decode()}")
@@ -239,7 +305,7 @@ def cpu_cont(ctx):
 def cpu_halt(ctx):
     """Break into debugger (stop execution)."""
     try:
-        with GDBClient(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as gdb:
+        with _gdb_client(ctx) as gdb:
             response = gdb.halt()
             click.echo(f"Halted: {response.decode()}")
     except Exception as e:
@@ -402,7 +468,7 @@ def screen(ctx, host: str, port: int):
 def screen_show(ctx):
     """Display current DOS text screen (80x25) to stdout."""
     try:
-        with DOSVideoTools(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as video:
+        with _video_tools(ctx) as video:
             lines = video.screen_dump()
             if lines:
                 for line in lines:
@@ -439,7 +505,7 @@ def screen_capture(ctx, output: str, fmt: str):
         dbxdebug screen capture -f html -o pretty
     """
     try:
-        with DOSVideoTools(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as video:
+        with _video_tools(ctx) as video:
             if fmt == "raw":
                 data = video.screen_raw()
                 if not data:
@@ -481,7 +547,7 @@ def screen_capture(ctx, output: str, fmt: str):
 def screen_info(ctx):
     """Show video mode and BIOS timer info."""
     try:
-        with DOSVideoTools(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as video:
+        with _video_tools(ctx) as video:
             mode = video.read_video_mode()
             ticks = video.read_timer_ticks()
             click.echo(f"Video mode: {mode} (0x{mode:02X})" if mode else "Video mode: unknown")
@@ -500,7 +566,7 @@ def screen_info(ctx):
 def screen_watch(ctx, interval: float):
     """Watch screen in real-time. Press Ctrl+C to stop."""
     try:
-        with DOSVideoTools(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as video:
+        with _video_tools(ctx) as video:
             click.echo("Watching screen... (Ctrl+C to stop)\n")
             while True:
                 click.echo("\033[2J\033[H", nl=False)  # Clear and home
@@ -535,7 +601,7 @@ def screen_record(ctx, output: str, duration: float, rate: float, raw: bool):
         dbxdebug screen record -d 60 -r 30 -o session.capture.gz
     """
     try:
-        with DOSVideoTools(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as video:
+        with _video_tools(ctx) as video:
             recorder = ScreenRecorder({"duration": duration, "sample_rate": rate})
             total_samples = int(duration * rate)
 
@@ -585,7 +651,7 @@ def screen_colors(ctx, capture_file: str | None):
             else:
                 pages = [screens]
         else:
-            with DOSVideoTools(ctx.obj["gdb_host"], ctx.obj["gdb_port"]) as video:
+            with _video_tools(ctx) as video:
                 raw = video.screen_raw()
                 if not raw:
                     click.echo("Failed to read screen", err=True)

@@ -272,12 +272,15 @@ address, and nothing reports it.
 client. A second one completes the TCP handshake and then blocks forever in
 `qSupported` — no refusal, no error, just a hang. Consequences:
 
-- Pointing `dbxdebug mem` / `cpu` / `screen` at a session that already holds
-  its own client hangs that command. Use `DosboxSession(connect=False)` if you
-  want the CLI to be the one client, or drive `session.gdb` from Python.
-- `DOSVideoTools(host, port)` opens its **own** `GDBClient`. Inside a session,
-  use `session.screen_lines()` instead; keep `DOSVideoTools` for the
-  standalone case where it owns the only connection.
+- Running `dbxdebug mem` / `cpu` / `screen` as a **separate process** against a
+  session that already holds its own client hangs that command. Use
+  `DosboxSession(connect=False)` if you want the CLI to be the one client, or
+  drive `session.gdb` from Python. Driven **in-process**, those groups borrow a
+  client you hand them:
+  `main(["cpu", "regs"], obj={GDB_CLIENT_KEY: session.gdb}, standalone_mode=False)`.
+- `DOSVideoTools(gdb=session.gdb)` borrows a session's client and never closes
+  it. `DOSVideoTools(host, port)` still opens and owns its **own** `GDBClient`,
+  which is right only when it is the sole client (lokkju/dbxdebug#11).
 
 **Unmapped memory is indistinguishable from zeroed memory.** The stub cannot
 report a failed read as such; a region that is not backed reads back as zeros.

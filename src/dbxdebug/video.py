@@ -2,6 +2,15 @@
 DOS video memory access utilities.
 
 Provides screen capture and video memory inspection for DOS text mode.
+
+`DOSVideoTools` either OWNS a `GDBClient` it built itself or BORROWS one the
+caller passed in, and it closes only a client it owns. Borrowing is the
+important case: the DOSBox-X stub serves ONE GDB client at a time
+(lokkju/dbxdebug#8), so a second connection completes the TCP handshake and
+then blocks forever in the `qSupported` exchange, with no read timeout to end
+it (lokkju/dbxdebug#4). Anything that already holds a client -- a
+`DosboxSession`, an embedding CLI -- must hand that client over rather than
+let these tools open a competing one (lokkju/dbxdebug#11).
 """
 
 from loguru import logger
@@ -22,28 +31,130 @@ BDA_TIMER_TICK = "0x0040:006C"  # 4-byte tick counter, 18.2065 Hz
 # Timer constants
 TIMER_FREQUENCY = 18.2065  # Hz
 
+# Default VGA text-mode geometry.
+DEFAULT_SCREEN_WIDTH = 80
+DEFAULT_SCREEN_HEIGHT = 25
+
+
+def decode_text_screen(
+    memory: bytes,
+    width: int = DEFAULT_SCREEN_WIDTH,
+    height: int = DEFAULT_SCREEN_HEIGHT,
+) -> list[str]:
+    """Decode a VGA text-mode framebuffer into one string per row.
+
+    THE single decode path for text-mode video memory. `screen_dump`,
+    `screen_dump_with_ticks` and `DosboxSession.screen_lines` all call this
+    rather than unpacking cells themselves; three copies of the same loop was
+    the drift risk recorded in lokkju/dbxdebug#7.
+
+    Video memory holds two bytes per cell -- the character first, then the
+    attribute byte, which is discarded here. A cell holding 0x00 renders as a
+    space; every other byte becomes `chr(byte)`, so the guest's code page 437
+    bytes come back as their Latin-1 code points, unmapped. Cells past the end
+    of `memory` render as spaces rather than raising, so a short read still
+    yields a full-size screen.
+
+    Args:
+        memory: Raw video memory, character/attribute interleaved.
+        width: Screen columns.
+        height: Screen rows.
+
+    Returns:
+        `height` strings of `width` characters each.
+    """
+    lines = []
+    for row in range(height):
+        chars = []
+        for col in range(width):
+            index = (row * width + col) * 2
+            byte = memory[index] if index < len(memory) else 0
+            chars.append(" " if byte == 0 else chr(byte))
+        lines.append("".join(chars))
+    return lines
+
 
 class DOSVideoTools:
-    """Tools for analyzing DOS program screen output."""
+    """Tools for analyzing DOS program screen output.
 
-    def __init__(self, host: str = "localhost", port: int = GDBClient.DEFAULT_PORT):
+    Wraps a `GDBClient` that this object either owns or borrows. See
+    `__init__` for how to choose, and `close` for what each choice means at
+    teardown.
+    """
+
+    def __init__(
+        self,
+        host: str | None = None,
+        port: int | None = None,
+        *,
+        gdb: GDBClient | None = None,
+    ):
         """
-        Initialize video tools with GDB connection.
+        Initialize video tools over an owned or a borrowed GDB connection.
+
+        Pass `gdb` to BORROW a client the caller already has -- typically
+        `DOSVideoTools(gdb=session.gdb)`. This object then never closes it;
+        the caller stays its owner. Pass `host`/`port` (or neither, for the
+        defaults) to have this object OWN a client it builds, which `close`
+        then closes.
+
+        Borrowing is not a nicety. The stub serves one GDB client at a time,
+        so opening a second one against a session that already has one hangs
+        rather than fails (lokkju/dbxdebug#11).
 
         Args:
-            host: GDB server hostname
-            port: GDB server port
+            host: GDB server hostname. Defaults to localhost. Only valid
+                when building an owned client.
+            port: GDB server port. Defaults to `GDBClient.DEFAULT_PORT`.
+                Only valid when building an owned client.
+            gdb: An already-connected client to borrow. Mutually exclusive
+                with `host`/`port`.
+
+        Raises:
+            ValueError: If `gdb` is combined with `host` or `port`. Silently
+                ignoring an explicitly passed port would connect somewhere
+                the caller did not ask for.
         """
-        self.gdb = GDBClient(host, port)
+        if gdb is not None:
+            if host is not None or port is not None:
+                raise ValueError(
+                    "pass either gdb= (to borrow a connected client) or host/port "
+                    "(to build one), not both"
+                )
+            self.gdb = gdb
+            self._owns_gdb = False
+        else:
+            self.gdb = GDBClient(
+                "localhost" if host is None else host,
+                GDBClient.DEFAULT_PORT if port is None else port,
+            )
+            self._owns_gdb = True
+
+    @property
+    def owns_client(self) -> bool:
+        """Whether this object built its own client and must close it.
+
+        Returns:
+            True if the client was built here, False if it was borrowed.
+        """
+        return self._owns_gdb
 
     def close(self) -> None:
-        """Close the GDB connection."""
-        self.gdb.close()
+        """Close the GDB connection, but only if this object owns it.
+
+        A BORROWED client is left open: its owner closes it. Closing here
+        would leave the owner holding a dead socket, and a double close on
+        the way out is exactly the failure that resurfaces later as an
+        unrelated hang.
+        """
+        if self._owns_gdb:
+            self.gdb.close()
 
     def __enter__(self) -> "DOSVideoTools":
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Close an owned client. Leaves a borrowed one open -- see `close`."""
         self.close()
 
     def read_timer_ticks(self) -> int | None:
@@ -87,24 +198,7 @@ class DOSVideoTools:
         try:
             addr = DOS_VIDEO_PAGE_ONE if page == 1 else DOS_VIDEO_PAGE_TWO
             memory = self.gdb.read_memory(addr, DOS_VIDEO_MEMORY_SIZE)
-
-            lines = []
-            for row in range(25):
-                line_text = ""
-                for col in range(80):
-                    char_index = (row * 80 + col) * 2
-                    if char_index < len(memory):
-                        char = memory[char_index]
-                        if char == 0:
-                            line_text += " "
-                        elif 32 <= char <= 126:
-                            line_text += chr(char)
-                        else:
-                            line_text += chr(char)
-                    else:
-                        line_text += " "
-                lines.append(line_text)
-            return lines
+            return decode_text_screen(memory)
         except Exception as e:
             logger.exception(e)
             return None
@@ -123,24 +217,7 @@ class DOSVideoTools:
 
             # Then read screen
             memory = self.gdb.read_memory(DOS_VIDEO_PAGE_ONE, DOS_VIDEO_MEMORY_SIZE)
-
-            lines = []
-            for row in range(25):
-                line_text = ""
-                for col in range(80):
-                    char_index = (row * 80 + col) * 2
-                    if char_index < len(memory):
-                        char = memory[char_index]
-                        if char == 0 or char == 32:
-                            line_text += " "
-                        elif 32 <= char <= 126:
-                            line_text += chr(char)
-                        else:
-                            line_text += chr(char)
-                    else:
-                        line_text += " "
-                lines.append(line_text)
-            return (lines, ticks)
+            return (decode_text_screen(memory), ticks)
         except Exception as e:
             logger.exception(e)
             return (None, None)
