@@ -13,7 +13,7 @@ import socket
 
 from loguru import logger
 
-from .addressing import parse_address
+from .addressing import linear_pc, parse_address
 from .utils import parse_x86_address
 
 # The vendor capability that means "Z0/z0 and m/M take a linear address."
@@ -22,6 +22,28 @@ from .utils import parse_x86_address
 # at a garbage location -- silently, since the response looks identical
 # either way. See addressing.py for the full history.
 LINEAR_BREAKPOINTS_CAPABILITY = "dosbox-x-linear-bp+"
+
+# Order of the 16 registers the `g`/`G`/`P` packets exchange, 4 bytes each,
+# little-endian. Position matches `addressing.CS_INDEX` (10) and
+# `addressing.EIP_INDEX` (8).
+REGISTER_NAMES = [
+    "eax",
+    "ecx",
+    "edx",
+    "ebx",
+    "esp",
+    "ebp",
+    "esi",
+    "edi",
+    "eip",
+    "eflags",
+    "cs",
+    "ss",
+    "ds",
+    "es",
+    "fs",
+    "gs",
+]
 
 
 class IncompatibleStubError(RuntimeError):
@@ -257,44 +279,45 @@ class GDBClient:
         if response != b"OK":
             raise MemoryError(f"Error writing memory at 0x{linear_addr:x}: {response.decode()}")
 
+    def read_register_list(self) -> list[int]:
+        """Read the raw 16-register `g` packet, in stub order.
+
+        Returns:
+            16 register values in the order `g`/`G`/`P` use: EAX, ECX, EDX,
+            EBX, ESP, EBP, ESI, EDI, EIP, EFLAGS, CS, SS, DS, ES, FS, GS.
+            `registers[addressing.EIP_INDEX]` is an offset within
+            `registers[addressing.CS_INDEX]`, not a linear address --
+            pass this list to `addressing.linear_pc` (or call `linear_pc()`
+            below) to get the linear program counter.
+        """
+        self._send_packet(b"g")
+        response = self._read_packet()
+
+        registers = []
+        for i in range(len(REGISTER_NAMES)):
+            hex_val = response[i * 8 : (i + 1) * 8]
+            val_bytes = binascii.unhexlify(hex_val)
+            registers.append(int.from_bytes(val_bytes, "little"))
+
+        return registers
+
     def read_registers(self) -> dict[str, int]:
         """
         Read all CPU registers.
 
         Returns:
-            Dict mapping register names to values
+            Dict mapping register names to values. **`registers["eip"]` is
+            an offset within `registers["cs"]`, not a linear address.**
+            DOSBox-X's GDB stub used to return `SegPhys(cs) + reg_eip` here
+            (and write `reg_eip` verbatim on `G`), so a `g`/`G` round-trip
+            against an old build silently moved the program counter. Code
+            written against that old build that treats this `eip` value as
+            a linear address is now silently wrong. Use `linear_pc()` to
+            get the linear program counter instead of combining `eip`
+            yourself.
         """
-        self._send_packet(b"g")
-        response = self._read_packet()
-
-        # Response is 16 registers, 8 hex chars each (little-endian)
-        reg_names = [
-            "eax",
-            "ecx",
-            "edx",
-            "ebx",
-            "esp",
-            "ebp",
-            "esi",
-            "edi",
-            "eip",
-            "eflags",
-            "cs",
-            "ss",
-            "ds",
-            "es",
-            "fs",
-            "gs",
-        ]
-
-        registers = {}
-        for i, name in enumerate(reg_names):
-            hex_val = response[i * 8 : (i + 1) * 8]
-            # Convert from little-endian
-            val_bytes = binascii.unhexlify(hex_val)
-            registers[name] = int.from_bytes(val_bytes, "little")
-
-        return registers
+        registers = self.read_register_list()
+        return dict(zip(REGISTER_NAMES, registers, strict=True))
 
     def read_register(self, reg_num: int) -> int:
         """
@@ -304,12 +327,44 @@ class GDBClient:
             reg_num: Register number (0-15)
 
         Returns:
-            Register value
+            Register value. If `reg_num` is `addressing.EIP_INDEX` (8),
+            this is an offset within CS, not a linear address -- see
+            `read_registers`.
         """
         self._send_packet(f"p{reg_num:x}".encode())
         response = self._read_packet()
         val_bytes = binascii.unhexlify(response)
         return int.from_bytes(val_bytes, "little")
+
+    def write_register(self, index: int, value: int) -> bool:
+        """Write a single register with the `P` packet.
+
+        Args:
+            index: Register number (0-15), in the same order as
+                `read_register_list` / `REGISTER_NAMES`. Writing
+                `addressing.EIP_INDEX` (8) sets the offset within CS, not a
+                linear address -- see `read_registers`.
+            value: New register value, encoded little-endian to match
+                `g`/`G`.
+
+        Returns:
+            True if the stub acknowledged the write with `OK`, False
+            otherwise (e.g. an `E`-prefixed error reply).
+        """
+        hex_val = value.to_bytes(4, "little").hex()
+        self._send_packet(f"P{index:x}={hex_val}".encode())
+        response = self._read_packet()
+        return response == b"OK"
+
+    def linear_pc(self) -> int:
+        """Read registers and compute the linear program counter.
+
+        Returns:
+            `CS * 16 + EIP`, per `addressing.linear_pc`. This is the value
+            to use as a linear address (e.g. for `read_memory` or
+            `set_breakpoint`) -- `read_registers()["eip"]` alone is not one.
+        """
+        return linear_pc(self.read_register_list())
 
     def set_breakpoint(self, address: str | int) -> bool:
         """
