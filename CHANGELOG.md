@@ -1,0 +1,45 @@
+# Changelog
+
+## [0.3.0](https://github.com/lokkju/dbxdebug/compare/v0.2.1...v0.3.0) (2026-09-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* **session:** set_breakpoint(seg, off) now computes a LINEAR address via addressing.linear(seg, off) instead of packing seg:off as a far pointer. Current DOSBox-X builds decode Z0/z0 as linear (this package's GDBClient requires dosbox-x-linear-bp+ at connect), so the old packed form would silently misplace the breakpoint while gdbserver still answered OK.
+* **gdb:** read_registers()["eip"] is now documented as an offset within CS, not a linear address, matching the fixed GDB stub semantics (register 8 is EIP-within-CS in both g and G directions on stubs that advertise dosbox-x-eip-offset+). Code that combined the old eip value directly as a linear address is silently wrong against a fixed stub; call linear_pc() to get the linear program counter instead.
+* **utils:** parse_x86_address (and anything that calls it, including the `dbxdebug mem`/`cpu` CLI commands) now interprets a bare digit string with no "0x" prefix as hexadecimal instead of decimal. Callers that were relying on decimal parsing of unprefixed strings (e.g. passing "1000" and expecting 1000 rather than 4096) must add an explicit base-10 conversion before calling, or use a "0x"-prefixed or already-hex string.
+* **gdb:** GDBClient now refuses to connect to a stub that does not advertise dosbox-x-linear-bp+. Such builds split the Z0 argument as a packed far pointer, so any breakpoint above 64 KB answers OK and never fires -- silently. Pass require_capabilities=False to proceed against an old build deliberately.
+
+### Features
+
+* **addressing:** add the linear addressing module ([e73ce82](https://github.com/lokkju/dbxdebug/commit/e73ce82479a8b1883305fb4db2d33b4f0d960e7c))
+* **cli:** add session list, session reap and doctor ([8179f94](https://github.com/lokkju/dbxdebug/commit/8179f94e11aa07a536ab027dec7dbc3dd425f16c))
+* **frames:** add real-mode stack frame walking ([02c2990](https://github.com/lokkju/dbxdebug/commit/02c29909e1a492e1392d0ddecec994da8e71ea83))
+* **gdb:** add register list, linear PC, and register write to GDBClient ([fc5729e](https://github.com/lokkju/dbxdebug/commit/fc5729e6e0561310c49d1ac94a84368bb051deed))
+* **gdb:** require dosbox-x-linear-bp+ at connect ([b8cc28f](https://github.com/lokkju/dbxdebug/commit/b8cc28fb31d444a961d8850987eef2bbe0bc6d34))
+* **qmp:** wrap memdump, screendump, savestate, loadstate, system_reset and quit ([c7a97c6](https://github.com/lokkju/dbxdebug/commit/c7a97c67561f2b732cff7d62b57f994fe8d922c8))
+* **registry:** add the session registry with list and reap ([2af648d](https://github.com/lokkju/dbxdebug/commit/2af648db88c446f1563ed83ab297b22b929f278d))
+* **session:** port the DosboxSession lifecycle from a downstream consumer ([70f26d9](https://github.com/lokkju/dbxdebug/commit/70f26d948cc49f57463c9d91657a7c0f896d0372))
+* **skills:** ship the two Agent Skills from this repo ([ff01e0d](https://github.com/lokkju/dbxdebug/commit/ff01e0daad568a9de0e031b5f5ed87d56fe1638b))
+
+
+### Bug Fixes
+
+* add shifted punctuation mappings to char_to_qcode ([6a19fb4](https://github.com/lokkju/dbxdebug/commit/6a19fb47a0de76841815664eeee78b3537502f86))
+* **addressing:** validate seg:off components and clarify parse errors ([c5d67a5](https://github.com/lokkju/dbxdebug/commit/c5d67a5792392dd373860f8cf880863d20b8d2e0))
+* **cli:** report the real package version instead of a hardcoded 0.1.0 ([8100d53](https://github.com/lokkju/dbxdebug/commit/8100d53cf9c228d31d0ed3997561680c4aa18f04))
+* **frames:** correct steps_out threshold and close review gaps ([880a965](https://github.com/lokkju/dbxdebug/commit/880a965c6855a22ae6de2edbc78091a8be05e028))
+* **paths:** unify dosbox-x binary resolution between session and doctor ([0bda742](https://github.com/lokkju/dbxdebug/commit/0bda742a35e8f56f74367268612b7fd45e3c528d))
+* satisfy ruff C420 and formatting gates ([d464033](https://github.com/lokkju/dbxdebug/commit/d46403357cce148df2d424ac1df54c24fcd296c3))
+* **session:** close start()/stop() review gaps from Task 8 round 1 ([6032fcb](https://github.com/lokkju/dbxdebug/commit/6032fcb7f1414149adc8f5363c433bded29f7e86))
+* **session:** restore process-group sweep lost by round-1's kill_group pid= ([c3cd6ff](https://github.com/lokkju/dbxdebug/commit/c3cd6ff5faed880ac9d9ef94ec3db2852ce3ab73))
+* **tests:** re-scope the desync guard and close integration review gaps ([0832b6d](https://github.com/lokkju/dbxdebug/commit/0832b6d3a6026c89d03c9574b43b5c727b019b88))
+* **utils:** parse bare address digits as hex, not decimal ([b0ba5be](https://github.com/lokkju/dbxdebug/commit/b0ba5bedb5b109f4279ba2e4119ee3a4268d0fda))
+
+
+### Documentation
+
+* add CI, PyPI, and license badges to README ([cb3d2fd](https://github.com/lokkju/dbxdebug/commit/cb3d2fda3cd81c736f20dba706ef90e8e6f3e4b4))
+* document the migration path onto dbxdebug ([e868090](https://github.com/lokkju/dbxdebug/commit/e8680907b976fd8ddb3ce7c5cdf5db0301fc6d54))
+* **frames:** neutralise downstream references and drop a false claim ([cbbec5a](https://github.com/lokkju/dbxdebug/commit/cbbec5ad2b446ea50902872ad3d76a4034e604ad))
+* rewrite the README around the session lifecycle ([5cd96ce](https://github.com/lokkju/dbxdebug/commit/5cd96ce8858f8ca4244237f158f8f067d3ab5f8b))
