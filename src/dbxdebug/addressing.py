@@ -75,6 +75,9 @@ def parse_address(addr: int | str) -> int:
         The linear address.
 
     Raises:
+        ValueError: If `addr` is a string with no `:` separator, or if
+            either the `seg` or `off` component of a `"seg:off"` string
+            does not fit in 16 bits.
         PackedAddressError: If `addr` is an integer at or above
             `REAL_MODE_CEILING`, indicating it is almost certainly a packed
             far pointer (`(seg << 16) | off`) rather than a real linear
@@ -82,8 +85,16 @@ def parse_address(addr: int | str) -> int:
             this check cannot catch.
     """
     if isinstance(addr, str):
-        seg_str, _, off_str = addr.partition(":")
-        return linear(int(seg_str, 16), int(off_str, 16))
+        seg_str, sep, off_str = addr.partition(":")
+        if not sep:
+            raise ValueError(f'expected an int or a "seg:off" hex string, got {addr!r}')
+        seg = int(seg_str, 16)
+        off = int(off_str, 16)
+        if not 0 <= seg <= 0xFFFF:
+            raise ValueError(f"segment out of range (0x0000-0xFFFF): {seg:#x}")
+        if not 0 <= off <= 0xFFFF:
+            raise ValueError(f"offset out of range (0x0000-0xFFFF): {off:#x}")
+        return linear(seg, off)
 
     if addr >= REAL_MODE_CEILING:
         raise PackedAddressError(

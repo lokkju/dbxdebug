@@ -37,6 +37,25 @@ def test_parse_address_allows_the_whole_real_mode_range():
     assert parse_address(0x10FFEF) == 0x10FFEF
 
 
+def test_parse_address_rejects_an_out_of_range_segment():
+    """ "10000" is a 17-bit segment; it must not silently wrap into range."""
+    with pytest.raises(ValueError, match="segment"):
+        parse_address("10000:0000")
+
+
+def test_parse_address_rejects_an_out_of_range_offset():
+    """ "1ffff" is a 17-bit offset; it must not silently wrap into range."""
+    with pytest.raises(ValueError, match="offset"):
+        parse_address("824:1ffff")
+
+
+def test_parse_address_rejects_a_colon_less_string():
+    """A bare string with no "seg:off" separator is not a valid input; the
+    error must name what was expected rather than leak int()'s message."""
+    with pytest.raises(ValueError, match="seg:off"):
+        parse_address("8000")
+
+
 def test_linear_pc_uses_cs_and_eip_indices():
     regs = [0] * 16
     regs[CS_INDEX] = 0x3000

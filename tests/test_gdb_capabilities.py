@@ -22,6 +22,12 @@ CURRENT_BUILD_REPLY = (
 # What an old, pre-fix build sends: no vendor features at all.
 OLD_BUILD_REPLY = b"PacketSize=3fff;swbreak+;hwbreak+;vContSupported+;QStartNoAckMode+"
 
+# A build that explicitly advertises the feature as UNSUPPORTED via the
+# GDB `name-` convention, rather than simply omitting it.
+EXPLICITLY_UNSUPPORTED_REPLY = (
+    b"PacketSize=3fff;swbreak+;hwbreak+;vContSupported+;QStartNoAckMode+;dosbox-x-linear-bp-"
+)
+
 
 def _gdb_packet(data: bytes) -> bytes:
     """Wrap `data` as a GDB remote-serial-protocol packet with checksum."""
@@ -98,6 +104,17 @@ def test_require_linear_breakpoints_raises_naming_missing_feature(monkeypatch: p
 def test_require_capabilities_false_suppresses_the_connect_check(monkeypatch: pytest.MonkeyPatch):
     client, _fake = _connect(monkeypatch, OLD_BUILD_REPLY, require_capabilities=False)
     assert "dosbox-x-linear-bp+" not in client.capabilities
+
+
+def test_connect_raises_when_linear_bp_explicitly_advertised_as_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A `name-` token means the feature is explicitly ABSENT, not present
+    under a different spelling. Only the exact `dosbox-x-linear-bp+` token
+    counts as support, so this reply must fail the connect-time check the
+    same way a reply that omits the feature entirely does."""
+    with pytest.raises(IncompatibleStubError, match="dosbox-x-linear-bp"):
+        _connect(monkeypatch, EXPLICITLY_UNSUPPORTED_REPLY)
 
 
 def test_set_breakpoint_rejects_a_packed_far_pointer_before_sending(
