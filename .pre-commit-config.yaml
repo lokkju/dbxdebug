@@ -62,13 +62,6 @@ repos:
   #         - --allow-init-docstring=True
   #       exclude: ^(tests/|src/dbxdebug/cli\.py)
 
-  # Commitizen for commit message linting (Conventional Commits)
-  - repo: https://github.com/commitizen-tools/commitizen
-    rev: v3.29.1
-    hooks:
-      - id: commitizen
-        stages: [commit-msg]
-
   # Actionlint for GitHub Actions workflow linting
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.4
