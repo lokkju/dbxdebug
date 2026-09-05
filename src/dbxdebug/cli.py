@@ -14,6 +14,7 @@ import time
 import click
 from loguru import logger
 
+from . import __version__
 from . import doctor as doctor_module
 from .addressing import linear_pc
 from .capture_io import ScreenRecorder, load_capture
@@ -32,7 +33,7 @@ logger.add(sys.stderr, level="WARNING")
 @click.group()
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")
 @click.option("--debug", is_flag=True, help="Enable debug logging")
-@click.version_option(version="0.1.0")
+@click.version_option(version=__version__)
 def main(verbose: bool, debug: bool):
     """DOSBox-X remote debug client.
 

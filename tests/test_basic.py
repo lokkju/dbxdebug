@@ -170,3 +170,19 @@ class TestScreenRecorder:
         assert len(recorder) == 1
         recorder.clear()
         assert len(recorder) == 0
+
+
+def test_cli_version_option_matches_the_package_version():
+    """The CLI must not carry its own hardcoded version string.
+
+    It reported 0.1.0 while the package was 0.2.1, so `--version` in a bug
+    report named a release that had not been current for two minor versions.
+    """
+    from click.testing import CliRunner
+
+    import dbxdebug
+    from dbxdebug.cli import main
+
+    result = CliRunner().invoke(main, ["--version"])
+    assert result.exit_code == 0
+    assert dbxdebug.__version__ in result.output
