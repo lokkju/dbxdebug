@@ -220,57 +220,63 @@ DOSBox-X and the path is returned instead.
 program DOS executes. Arm it, then type the name. Arming after the exec has
 happened does nothing for that program.
 
-**And know what arming costs you.** `debug_break_on_exec` arms *and
+**And know what arming does to the wire.** `debug_break_on_exec` arms *and
 immediately activates* a breakpoint, whether or not any GDB client asked to
 continue. When it fires while the CPU is free-running, the stub sends a
-`$S05#b8` **nobody requested**, and `GDBClient` — which assumes strict
-request/response — reads that `$` where it expects the `+` ACK for its own
-next packet. The connection is spent from that moment
-(lokkju/dbxdebug#5, confirmed by a live test).
+`$S05#b8` **nobody requested**, landing where `GDBClient` expects the `+` ACK
+for its own next packet. That used to break the connection outright; the
+client now diverts it to a queue instead (lokkju/dbxdebug#5, fixed, with a
+live test).
 
 So, verified behaviour:
 
-- Learn that the CPU stopped by polling **`qmp.query_status()["running"]`**.
-  QMP is a separate socket and is undisturbed.
-- Treat the GDB connection as spent once the break fires. Do not "recover" it.
+- The GDB connection **survives** the break. The read that follows is still
+  answered with its own bytes.
+- Learn that the CPU stopped from **`gdb.take_pending_stops()`** — it returns
+  the queued stop replies and empties the queue — or by polling
+  **`qmp.query_status()["running"]`** on the separate QMP socket. Either
+  works; the QMP poll is what you want when you are waiting rather than
+  reacting.
 - A plain `Z0` breakpoint armed while free-running is **inert** and is not a
   trigger — activation only happens on continue. This is why the ordinary
   breakpoint recipe (`halt` → `set_breakpoint` → `continue_execution`) is
-  clean: the `S05` is the answer to your own `c`.
+  clean: the `S05` is the answer to your own `c`, so it is returned to you
+  rather than queued.
 
 ---
 
-## 7. Known hazards — all confirmed, none fixed
+## 7. Known hazards — one open, two fixed but still worth knowing
 
-**No read timeout** (lokkju/dbxdebug#4). `GDBClient` never calls `settimeout`,
-so any packet the stub does not answer hangs the caller forever with no
-diagnostic. Arm the socket yourself, right after `start()`:
+**Reads are bounded** (lokkju/dbxdebug#4, fixed). `GDBClient` arms a 30 s read
+timeout on every read, not just the connect, and raises `GDBTimeoutError` — a
+`TimeoutError` subclass — naming the packet that went unanswered. Override it
+with `GDBClient(timeout=...)`; `timeout=None` restores unbounded blocking. The
+interaction that made this easy to hit is unchanged: while the emulator is
+QMP-stopped the GDB stub is not serviced, so `qmp.stop()` followed by a GDB
+request cannot be answered. Use `gdb.halt()` when you also intend to talk GDB.
 
-```python
-if session.gdb is not None and session.gdb.sock is not None:
-    session.gdb.sock.settimeout(30.0)
-```
-
-**The stream is never resynchronised** (lokkju/dbxdebug#5). Once a reply is
-left unread — by a timeout, or by the unsolicited stop reply in §6 — every
-later request returns the **previous** request's payload, silently and
-permanently. Eight bytes asked for, sixteen returned, from a different
-address, and nothing reports it.
+**A disturbed stream resynchronises, or refuses** (lokkju/dbxdebug#5, fixed).
+An unrequested stop reply goes to `gdb.pending_stops` instead of being read as
+an answer, and an abandoned exchange is drained before the next packet is
+sent, so the request after a `GDBTimeoutError` gets its own reply. If that
+drain cannot complete the client marks itself **permanently unusable** and
+every later call raises `GDBDesyncError` — a loud failure, by design, instead
+of someone else's bytes. Open a new client at that point.
 
 - Keep GDB traffic strictly serialised: one request per reply, on one thread.
-- Treat `TimeoutError` from a GDB call as **fatal to that connection**. Tear
-  the session down and start another. Do not retry the request.
-- Check the length of every `read_memory` result against what you asked for.
-  It is the one cheap symptom visible from outside.
+  The resynchronisation is only provable because the client never pipelines.
+- Catch `GDBTimeoutError` where you would have hung before. It does not spend
+  the connection; `GDBDesyncError` does.
 - **Do not add a read-retry loop.** "Read until two consecutive reads agree"
   is the obvious workaround and it is wrong twice over: it doubles the
   round-trips on every read, and two identical consecutive requests mask a
   one-packet lag *perfectly*. It converts a detectable protocol fault into an
-  undetectable one. The fix belongs in the client's packet layer.
+  undetectable one — which is why the fix went in the client's packet layer.
 
-**One GDB client at a time** (lokkju/dbxdebug#8). The stub serves a single GDB
-client. A second one completes the TCP handshake and then blocks forever in
-`qSupported` — no refusal, no error, just a hang. Consequences:
+**One GDB client at a time** (lokkju/dbxdebug#8, open). The stub serves a
+single GDB client. A second one completes the TCP handshake and is then never
+serviced — no refusal, and nothing on the wire; with the read timeout above it
+now fails after 30 s rather than hanging forever. Consequences:
 
 - Pointing `dbxdebug mem` / `cpu` / `screen` at a session that already holds
   its own client hangs that command. Use `DosboxSession(connect=False)` if you

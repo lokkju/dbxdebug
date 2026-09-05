@@ -222,8 +222,10 @@ itself reaches, not the `pop bp` or `leave` before it. Consequences:
 * called at a procedure's first instruction, before the prologue has run, BP
   still belongs to the caller and this measures the caller's frame;
 * **clear every breakpoint first.** A breakpoint hit during one of these steps
-  makes the stub emit an unsolicited stop reply, which permanently desyncs the
-  GDB connection -- see Known hazards.
+  makes the stub emit an unsolicited stop reply. The connection no longer
+  desyncs on one -- it is queued on `gdb.pending_stops` -- but the stop you
+  get is still not the step you asked for, so the walk ends up measuring a
+  frame you did not mean to be in. See Known hazards.
 
 ## CLI
 
@@ -342,40 +344,49 @@ with DOSVideoTools() as video:
 
 ## Known hazards
 
-Three open defects. All three are reproduced, all have tests pinning today's
-behaviour, and none is fixed. Plan around them.
+One open defect, and two that are fixed but still shape how you should write
+against this library.
 
-**No read timeout** ([#4](https://github.com/lokkju/dbxdebug/issues/4)).
-`GDBClient` never calls `settimeout`, so any packet the stub does not answer
-hangs the caller forever with no diagnostic. This is easy to reach by
-accident, because the two protocols interact: while the emulator is
-QMP-stopped the GDB stub does not answer at all, so `qmp.stop()` followed by
-any GDB request is a deadlock. Arm the socket yourself right after `start()`:
+**Unanswered GDB packets: bounded, not silent** (was
+[#4](https://github.com/lokkju/dbxdebug/issues/4), fixed). `GDBClient` arms a
+30 s read timeout on every read, not just the connect, and raises
+`GDBTimeoutError` naming the packet that went unanswered. Override it per
+client with `GDBClient(timeout=...)`, or pass `timeout=None` for the old
+unbounded blocking. The underlying interaction is unchanged and still worth
+knowing: while the emulator is QMP-stopped the GDB stub is not serviced at
+all, so `qmp.stop()` followed by any GDB request cannot be answered. It now
+fails in 30 s with a message instead of deadlocking. Use `qmp.memdump` (which
+works while QMP-stopped) or `gdb.halt()` instead of stopping over QMP.
 
-```python
-if session.gdb is not None and session.gdb.sock is not None:
-    session.gdb.sock.settimeout(30.0)
-```
+**Stream desync: resynchronised, or refused** (was
+[#5](https://github.com/lokkju/dbxdebug/issues/5), fixed). Both triggers were
+reproduced against a live build -- an unsolicited `$S05` stop reply (QMP
+break-on-exec fires one nobody asked for) and a timed-out request leaving its
+reply in the stream -- and both are handled at the framing layer:
 
-**Desync after a timeout or an unsolicited stop reply**
-([#5](https://github.com/lokkju/dbxdebug/issues/5) -- confirmed and
-reproduced). `GDBClient` assumes strict request/response and never
-resynchronises. Once a reply is left unread, every later request returns the
-*previous* request's payload, silently and permanently. Both triggers are
-confirmed against a live build: an unsolicited `$S05` stop reply (QMP
-break-on-exec fires one nobody asked for), and a timed-out request leaving its
-reply in the stream -- so the `settimeout` above converts a hang into a
-`TimeoutError` that lands you here instead. Keep GDB traffic serialised on one
-thread, treat `TimeoutError` as fatal to the connection rather than retryable,
-and check the length of every `read_memory` result against what you asked for:
-it is the one cheap symptom visible from outside. Do not add a read-retry
-loop -- two identical consecutive requests mask a one-packet lag perfectly, so
-it would look like it worked whether or not the stream had shifted.
+* an unrequested stop reply is diverted to `gdb.pending_stops` instead of
+  being read as an answer. Drain it with `gdb.take_pending_stops()`; the
+  queue keeps the most recent 64. This is how you learn the CPU stopped
+  without polling QMP;
+* an abandoned exchange is drained before the next packet is sent, so the
+  request after a `GDBTimeoutError` gets its own reply rather than the
+  previous one's;
+* if that drain cannot complete, the client marks itself **permanently
+  unusable** and every later call raises `GDBDesyncError`. That is
+  deliberate: a loud failure beats a plausible wrong answer. Open a new
+  `GDBClient`.
+
+Still true, and still worth doing: keep GDB traffic serialised on one thread,
+and never add a read-retry loop. Two identical consecutive requests mask a
+one-packet lag perfectly, so retrying would look like it worked whether or
+not the stream had shifted.
 
 **One GDB client at a time**
 ([#8](https://github.com/lokkju/dbxdebug/issues/8)). The stub serves a single
-GDB client. A second one completes the TCP connect and then blocks forever in
-the `qSupported` handshake -- no refusal, no error, just a hang. In particular,
+GDB client. A second one completes the TCP connect and then never gets its
+`qSupported` reply -- no refusal, and nothing on the wire; with the read
+timeout above it now fails after 30 s rather than hanging forever, but it
+still does not work. In particular,
 pointing a `dbxdebug mem` / `cpu` / `screen` command at a session that already
 holds its own GDB client hangs that command. Use
 `DosboxSession(connect=False)` if you want the CLI to be the one client, or
@@ -403,8 +414,12 @@ prove the library actually drives one: the vendor GDB capabilities, `eip` as an
 offset rather than a linear address, a breakpoint above 64 KB firing, `memdump`
 agreeing with GDB reads and refusing while the CPU runs, `frames.steps_out`
 stopping after a real 16-bit `ret`, and what the GDB client does when the
-stream is disturbed -- which today is desync, pinned by tests that fail the
-moment it is fixed. The binary is located with `dbxdebug.paths.find_dosbox_x`
+stream is disturbed -- an unrequested stop reply queued rather than read as an
+answer, an abandoned reply drained rather than handed to the next request, and
+a request the stub will never answer bounded rather than deadlocked. The
+framing paths a live emulator will not produce on demand are covered against a
+fake socket in `tests/test_gdb_framing.py`.
+The binary is located with `dbxdebug.paths.find_dosbox_x`
 -- set `DBXDEBUG_DOSBOX` to choose a specific build -- and the tests skip when
 none is found.
 

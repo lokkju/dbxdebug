@@ -96,7 +96,7 @@ assert gdb.read_memory(0xFFFF0, 16).startswith(bytes.fromhex("ea5be000"))
 
 If the probe reads correctly and your address does not, the address is wrong
 (or the program has not loaded there yet) — not the transport. If the probe is
-*also* zeros, suspect the desync below instead.
+*also* zeros, suspect the stream trouble below instead.
 
 **Also check:** you may be reading a segment:offset pair you packed. Passing
 `(seg << 16) | off` as an int to `read_memory` raises `PackedAddressError`
@@ -107,39 +107,48 @@ not a proof that a call site is converted.
 
 ---
 
-## "The client hung and never came back"
+## "A GDB call raised GDBTimeoutError"
 
-**Cause: `GDBClient` has no read timeout** (lokkju/dbxdebug#4). It never calls
-`settimeout`, so the socket blocks with no deadline. Any packet the stub does
-not answer hangs you permanently, with no diagnostic.
+**Cause: the stub did not answer that packet** (lokkju/dbxdebug#4, fixed —
+this used to be an unbounded hang). `GDBClient` arms a 30 s read timeout on
+every read, so an unanswered packet now raises `GDBTimeoutError`, naming the
+packet:
+
+```
+GDBTimeoutError: GDB stub did not answer b'mffff0,10' within 30.0s. ...
+```
 
 The easiest way in is protocol interaction: **while the emulator is
 QMP-stopped, the GDB stub does not answer at all** (it is polled from the
-emulation thread). So `qmp.stop()` followed by any GDB request is a deadlock —
-and it is a natural thing to write, because `memdump` requires a stopped CPU.
+emulation thread). So `qmp.stop()` followed by any GDB request can never be
+served — and it is a natural thing to write, because `memdump` requires a
+stopped CPU.
 
 **Fix.**
 
 - Stop the CPU with `gdb.halt()` when you also intend to talk GDB. Reserve
-  `qmp.stop()` for QMP-only work.
-- Arm the socket yourself right after `start()`:
-  ```python
-  if session.gdb is not None and session.gdb.sock is not None:
-      session.gdb.sock.settimeout(30.0)
-  ```
-- Understand that this converts the hang into a `TimeoutError` that lands you
-  in the next entry. Read it before deciding what to catch.
+  `qmp.stop()` for QMP-only work — `memdump` itself works fine while
+  QMP-stopped.
+- Set your own bound if 30 s is wrong for your workload:
+  `GDBClient(timeout=...)`, or `session.gdb.sock.settimeout(...)` after
+  `start()`. Nothing is cached; every read consults the socket's own value.
+- The connection **survives** this. The client drains what the abandoned
+  exchange still owes before it sends anything else, so the next request gets
+  its own reply. Do not tear the session down reflexively.
 
 **Second cause: a second GDB client.** See "a second client just hangs" below.
 
 ---
 
-## "Reads started returning the wrong data"
+## "A GDB call raised GDBDesyncError"
 
-**Cause: the client desynced and never resynchronised** (lokkju/dbxdebug#5,
-confirmed and reproduced). `GDBClient` assumes strict request/response. Once a
-reply is left unread, every later request returns the **previous** request's
-payload — silently and permanently.
+**Cause: the client cannot prove where it sits in the packet stream**
+(lokkju/dbxdebug#5, fixed — this used to be silent wrong data). It happens
+after a `GDBTimeoutError` whose abandoned reply never arrived either, so the
+drain that would have put the stream back could not complete. The client marks
+itself **permanently unusable** at that point and raises on every later call.
+
+That is deliberate. What it replaced was worse:
 
 ```
 baseline m 0x400,8    = f803f80200000000
@@ -149,47 +158,50 @@ then m 0x400,8  ->  8 bytes: f803f80200000000
 ```
 
 Eight bytes asked for, sixteen returned, from a different address, and nothing
-reports it. Code that slices the result to the length it expected turns wrong
-bytes into plausible ones.
+reported it. Code that sliced the result to the length it expected turned
+wrong bytes into plausible ones.
 
-**Two confirmed triggers.**
+**Fix.** Open a new `GDBClient` — the old one will not recover, by design. If
+this keeps happening, the stub is not answering at all: check that no second
+client holds the connection, and that the emulator is not QMP-stopped.
 
-1. **An unsolicited stop reply.** `qmp.debug_break_on_exec(True)` arms *and
-   immediately activates* a breakpoint at the next program's entry point,
-   regardless of whether any GDB client asked to continue. When it hits, the
-   stub sends a `$S05#b8` nobody requested; the client's next `_send_packet`
-   reads that `$` where it expects its own `+` ACK. This one at least raises
-   (`ConnectionError: Failed to receive ACK. Got: b'$'`).
-2. **A timed-out request.** The abandoned reply stays in the stream and is
-   handed to the next request. This one is silent.
+**What no longer causes it.**
 
-**Fix.**
+- **An unsolicited stop reply.** `qmp.debug_break_on_exec(True)` arms *and
+  immediately activates* a breakpoint at the next program's entry point,
+  regardless of whether any GDB client asked to continue, and the resulting
+  `$S05#b8` lands where the client expects its own `+` ACK. It is now diverted
+  to `gdb.pending_stops`; drain it with `gdb.take_pending_stops()`. The read
+  that follows still gets its own bytes.
+- **A single timed-out request.** What the stub still owes is drained before
+  the next packet is sent, so one timeout no longer shifts anything.
+
+**Still worth doing.**
 
 - Keep GDB traffic strictly serialised — one request per reply, one thread.
-- Treat `TimeoutError` from a GDB call as **fatal to that connection**. Tear
-  the session down and start a new one.
-- If you arm `debug_break_on_exec`, assume the GDB connection is spent once
-  the break fires. Learn the stop from `qmp.query_status()["running"]` — QMP
-  is a separate socket and is undisturbed.
+  The resynchronisation is only provable because the client never pipelines.
 - Clear every breakpoint before calling `frames.steps_out`. A breakpoint hit
-  during one of its single steps pushes an extra stop reply onto the wire.
-- Compare `len(result)` against what you asked for on every `read_memory`.
+  during one of its single steps pushes an extra stop reply onto the wire; it
+  is queued rather than mistaken for an answer now, but the stop you get is
+  still not the step you asked for.
 
-**Do NOT paper over this with a read-retry loop.** "Read the same bytes until
-two consecutive reads agree" is the obvious workaround and it is wrong twice
-over: it doubles the round-trips on every read, and two identical consecutive
-requests mask a one-packet lag *perfectly* — so it would look like it worked
-whether or not the stream had shifted. It converts a detectable protocol fault
-into an undetectable one. The fix belongs in the client's packet layer.
+**Do NOT paper over stream trouble with a read-retry loop.** "Read the same
+bytes until two consecutive reads agree" is the obvious workaround and it is
+wrong twice over: it doubles the round-trips on every read, and two identical
+consecutive requests mask a one-packet lag *perfectly* — so it would look like
+it worked whether or not the stream had shifted. It converts a detectable
+protocol fault into an undetectable one. That is why the fix went into the
+client's packet layer.
 
 ---
 
 ## "A second client just hangs"
 
 **Cause: the stub serves ONE GDB client at a time** (lokkju/dbxdebug#8). A
-second connection completes the TCP handshake and then blocks forever inside
-the `qSupported` handshake. No refusal, no error, no timeout — the constructor
-simply never returns.
+second connection completes the TCP handshake and is then never serviced. No
+refusal and nothing on the wire, so the constructor sits in the `qSupported`
+handshake until the read timeout expires and raises `GDBTimeoutError` — 30 s
+by default. It used to hang there forever.
 
 **Common ways in.**
 
@@ -278,8 +290,9 @@ DOSBox-X refuses it outright while the guest is running rather than risk a
 torn read.
 
 **Fix.** Stop the CPU first. Use `gdb.halt()` if you also intend to talk GDB;
-`qmp.stop()` works too but then any GDB request deadlocks (see "the client
-hung"). `system_reset` carries the mirror-image guard: it refuses while
+`qmp.stop()` works too but then any GDB request goes unanswered and raises
+`GDBTimeoutError` (see that entry). `system_reset` carries the mirror-image
+guard: it refuses while
 GDB-halted, and allows a plain QMP `stop`.
 
 ---

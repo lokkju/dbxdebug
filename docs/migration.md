@@ -17,7 +17,7 @@ this list that can be wrong at runtime without producing an error.
 | `read_registers()["eip"]` is an offset in CS | **Silently. No exception, no wrong-looking value** | `gdb.linear_pc()` |
 | Client method names differ | Loudly, `AttributeError` | Section 3's tables |
 | `GDBClient` demands a vendor capability | Loudly, `IncompatibleStubError` at connect | Rebuild the emulator, or `require_capabilities=False` |
-| No read timeout, no resynchronisation | Hangs forever, or returns the previous reply's bytes | Section 5 |
+| GDB reads are now bounded and resynchronised | `GDBTimeoutError` where old code hung; `GDBDesyncError` where it silently answered wrong | Section 5 |
 
 ## 1. Imports
 
@@ -274,7 +274,7 @@ copy may differ further -- in particular it will not have the
 
 | `dosbox_debug.GDBClient` | `dbxdebug.GDBClient` | Notes |
 |---|---|---|
-| `GDBClient(host, port, timeout=5.0)` then `.connect()` | `GDBClient(host, port, require_capabilities=True)` | Connects and completes the `qSupported` handshake in `__init__`. **No `timeout` parameter at all** (section 5) |
+| `GDBClient(host, port, timeout=5.0)` then `.connect()` | `GDBClient(host, port, require_capabilities=True, timeout=30.0)` | Connects and completes the `qSupported` handshake in `__init__`. `timeout` bounds every read, not just the connect (section 5) |
 | `connect()` | -- | Constructor connects |
 | `close()` (sends `D` first) | `close()` | No detach packet. The stub treats a dropped connection as a resume, so the guest is not stranded |
 | `read_registers() -> Registers` | `read_registers() -> dict[str, int]` | Dataclass gone; `regs.eip` no longer works, `regs["eip"]` does. **Meaning changed: section 2.3** |
@@ -294,7 +294,7 @@ copy may differ further -- in particular it will not have the
 | `detach()` | -- | No equivalent; `close()` only |
 | `enable_no_ack_mode()` | `enable_no_ack_mode()` | Present, and never called by the package. Sessions run in ACK mode |
 | `screen_raw()`, `screen_dump()`, `screen_line()`, `screen_dump_with_ticks()`, `screen_debug()`, `read_video_mode()`, `read_timer_ticks()` | Moved off the GDB client to `DOSVideoTools`, plus `DosboxSession.screen_lines()` | Signatures differ: `DOSVideoTools.screen_dump(page=1)` takes a page, not `(width, height)`; `session.screen_lines(width=80, height=25)` takes the geometry. `screen_line()` has no equivalent -- index the list |
-| `GDBError` | `MemoryError`, `ConnectionError`, `IncompatibleStubError` | There is no single client exception type to catch |
+| `GDBError` | `MemoryError`, `ConnectionError`, `IncompatibleStubError`, `GDBTimeoutError`, `GDBDesyncError` | There is no single client exception type to catch. `GDBTimeoutError` is a `TimeoutError`; `GDBDesyncError` is a `ConnectionError` |
 
 Two things the table cannot show.
 
@@ -309,8 +309,9 @@ difference.
 constructs a `GDBClient` of its own. The emulator's stub serves one client at
 a time -- it only accepts a new connection while it has none -- so pointing
 `DOSVideoTools` at a session that already has a connected client gets a TCP
-connection the stub never services, and the constructor blocks in the
-`qSupported` handshake with no timeout (5.1). Inside a session, use
+connection the stub never services, and the constructor fails in the
+`qSupported` handshake once the read timeout expires (5.1). Inside a session,
+use
 `session.screen_lines()`; keep `DOSVideoTools` for the standalone case where
 it owns the only connection. That the two decode loops are duplicated at all
 is lokkju/dbxdebug#7.
@@ -367,57 +368,64 @@ old build fails at `start()` rather than at the first breakpoint.
 
 ## 5. Hazards to plan for
 
-Two open defects in `GDBClient`. Both are reproduced, both have live tests
-pinning today's behaviour, and neither is fixed. Plan around them.
+Two defects that shaped how the old code had to be written are now fixed in
+`GDBClient`, and one is still open. What changed matters for a migration
+because the failure MODE changed: what used to hang, or answer wrongly and
+silently, now raises.
 
-### 5.1 No read timeout: an unanswered packet hangs forever (lokkju/dbxdebug#4)
+### 5.1 GDB reads are bounded (was lokkju/dbxdebug#4, fixed)
 
-`GDBClient` never calls `settimeout`, so its socket is in blocking mode with
-no deadline. Any packet the stub does not answer hangs the caller
-permanently, with no diagnostic.
+`GDBClient.__init__` takes a `timeout` (default 30 s) and arms it on the
+socket, so it bounds every read, not just the connect. A packet the stub does
+not answer raises `GDBTimeoutError` -- a `TimeoutError` subclass -- naming the
+packet that went unanswered:
 
-This is easy to reach by accident, because the two protocols interact: while
-the emulator is QMP-stopped, the GDB stub does not answer at all (it is
-polled from the emulation thread). So `qmp.stop()` followed by any GDB
-request is a deadlock, and `qmp.stop()` followed by a GDB request is a
-natural thing to write.
-
-Until it is fixed, arm the socket yourself, immediately after the session
-starts. This is what the package's own live suite does:
-
-```python
-session.start()
-if session.gdb is not None and session.gdb.sock is not None:
-    session.gdb.sock.settimeout(30.0)
+```
+GDBTimeoutError: GDB stub did not answer b'mffff0,10' within 30.0s. ...
 ```
 
-That converts the hang into `TimeoutError` -- which lands you in 5.2, so read
-on before you decide what to catch.
+Pass `timeout=None` for the old unbounded blocking, deliberately.
 
-### 5.2 A disturbed stream is never resynchronised (lokkju/dbxdebug#5)
+The interaction that made this easy to hit is unchanged: while the emulator is
+QMP-stopped, the GDB stub does not answer at all (it is polled from the
+emulation thread). So `qmp.stop()` followed by any GDB request cannot be
+served -- it now fails with the message above rather than deadlocking. Read
+memory with `qmp.memdump`, which does work while QMP-stopped, or halt over GDB
+with `gdb.halt()` instead of stopping over QMP.
 
-`GDBClient` assumes strict request/response and never puts the stream back.
-Once a reply is left unread, every later request returns the **previous**
-request's payload, silently and permanently. There are two triggers, both
-confirmed against a live build.
+A consumer that armed `session.gdb.sock.settimeout(30.0)` itself after
+`start()` can keep doing so: nothing caches the timeout, and every read
+consults the socket's own value. It is now an override rather than the only
+line of defence.
+
+### 5.2 A disturbed stream is resynchronised, or refused (was lokkju/dbxdebug#5, fixed)
+
+The old client assumed strict request/response and never put the stream back,
+so once a reply was left unread every later request returned the **previous**
+request's payload, silently and permanently. Both triggers were confirmed
+against a live build, and both are now handled at the framing layer.
 
 **Trigger 1 -- an unsolicited stop reply.** QMP break-on-exec arms *and
-immediately activates* a breakpoint at the next program's entry point,
-whether or not any GDB client asked to continue. When it hits, the stub sends
-a `$S05#b8` nobody requested. The client's next `_send_packet` reads that `$`
-where it expects the `+` ACK for its own packet:
+immediately activates* a breakpoint at the next program's entry point, whether
+or not any GDB client asked to continue. When it hits, the stub sends a
+`$S05#b8` nobody requested, landing where the client's next packet expects its
+`+` ACK. That used to raise `ConnectionError: Failed to receive ACK. Got:
+b'$'` and leave the connection spent. It is now diverted to a queue:
 
+```python
+qmp.debug_break_on_exec(True)
+# ... the break fires, unprompted ...
+gdb.read_memory(0xFFFF0, 16)      # still answered with the ROM's own bytes
+gdb.take_pending_stops()          # [b'S05'] -- the stop, delivered once
 ```
-break-on-exec armed and a program typed; hammering `m` for 12s
-read 1: RAISED ConnectionError: Failed to receive ACK. Got: b'$'
-```
 
-Note that this one at least raises. A `Z0` breakpoint armed while
-free-running is inert and is *not* a trigger -- activation only happens on
-continue.
+`gdb.pending_stops` reads the queue without draining it;
+`gdb.take_pending_stops()` empties it. The queue keeps the most recent 64.
+Note that a `Z0` breakpoint armed while free-running is inert and never was a
+trigger -- activation only happens on continue.
 
-**Trigger 2 -- a timed-out request.** The abandoned reply stays in the
-stream and is handed to the next request:
+**Trigger 2 -- a timed-out request.** The abandoned reply used to stay in the
+stream and be handed to the next request:
 
 ```
 baseline m 0x400,8    = f803f80200000000
@@ -427,29 +435,34 @@ next m 0x400,8  -> 16 bytes: ea5be000f030312f30312f393200fc55   <-- PREVIOUS req
 then m 0x400,8  ->  8 bytes: f803f80200000000
 ```
 
-Eight bytes were asked for and sixteen arrived, from a different address, and
-nothing reports it. A consumer that does not compare the returned length
-against the requested one gets no signal at all, and one that slices the
-result to the length it expected turns wrong bytes into plausible ones.
+The client now knows exactly what the stub still owes for an abandoned
+exchange -- an ACK, a reply, or both -- and drains precisely that much before
+sending anything else, so the request after a `GDBTimeoutError` gets its own
+reply. If that drain cannot complete, the client marks itself **permanently
+unusable** and every later call raises `GDBDesyncError`. That is deliberate: a
+loud failure beats a plausible wrong answer.
 
-What to do until this is fixed:
+What a consumer should still do:
 
 * Keep GDB traffic strictly serialised, one request per reply, on one thread.
-* Treat `TimeoutError` from a GDB call as fatal to that connection, not as
-  something to retry. Tear the session down and start another.
-* If you arm `debug_break_on_exec`, assume the GDB connection is spent once
-  the break fires. Poll `qmp.query_status()` on the QMP connection (a
-  separate socket, undisturbed) to learn that the CPU stopped.
-* Check the length of every `read_memory` result against what you asked for.
-  It is the one cheap symptom that is visible from outside.
+  The resynchronisation is only provable because the client never pipelines.
+* Catch `GDBTimeoutError` where the old code would have hung. The connection
+  survives it; `GDBDesyncError` is the one that does not.
+* Do **not** add a read-retry loop. Two identical consecutive requests mask a
+  one-packet lag perfectly, so retrying looks like it works whether or not the
+  stream has shifted.
+* If you arm `debug_break_on_exec`, drain `gdb.take_pending_stops()` to learn
+  the CPU stopped. Polling `qmp.query_status()` on the separate QMP socket
+  still works and is still the way to wait for it.
 
-**Do not paper over this with a read-retry loop.** A "read the same bytes
-until two consecutive reads agree" helper is the obvious workaround and it is
-the wrong one twice over: it doubles the round-trips on every read, and two
-identical consecutive requests mask a one-packet lag *perfectly*, so it would
-look like it worked whether or not the stream had shifted. It converts a
-detectable protocol fault into an undetectable one. The fix belongs in the
-client's packet layer.
+### 5.3 One GDB client at a time (lokkju/dbxdebug#8, open)
+
+The stub serves a single GDB client, and only accepts a new connection while
+it has none. A second client completes the TCP connect and is then never
+serviced; with the read timeout above it fails in the `qSupported` handshake
+after 30 s instead of hanging forever, but it still does not work. Use
+`DosboxSession(connect=False)` if the CLI is to be the one client, or drive
+the session's own `session.gdb` from Python.
 
 ## 6. Migration checklist
 
@@ -483,8 +496,9 @@ Work through it in order. Each step is a thing you can finish and check.
 7. **Decide the capability policy.** Default (refuse an old stub) unless you
    deliberately drive one, in which case confine `require_capabilities=False`
    to a single adapter.
-8. **Arm a socket timeout** on `session.gdb.sock` right after `start()`
-   (5.1), and make a timeout tear the session down rather than retry (5.2).
+8. **Decide your timeout.** The 30 s default is armed for you; pass
+   `GDBClient(timeout=...)` if your workload needs a different bound (5.1),
+   and handle `GDBTimeoutError` where the old code would have hung (5.2).
 9. **Verify against a real emulator.** Run this package's live suite, which
    is exactly the evidence a consumer needs:
 

@@ -301,7 +301,8 @@ the *previous* request's payload. The client is now permanently one packet
 behind, silently, returning plausible-looking answers to the wrong questions.
 The in-repo raw client has no reply-to-request correlation to catch this
 (`tests/integration/protocol/gdb.py`), and QMP has no `id` echo either, so
-neither protocol can self-correct.
+neither protocol can self-correct from the reply alone — a client has to track
+what it is owed instead, which is what `dbxdebug.gdb.GDBClient` now does.
 
 Symptoms that look like a stub bug but are this: register values that belong to
 the previous step; a memory read returning the bytes you asked for one call
@@ -315,14 +316,22 @@ ago; `OK` arriving in response to a `g`.
 2. **Prefer `QStartNoAckMode`.** It removes the `+`/`-` interleaving that makes
    trigger 1 corrupting rather than merely surprising. Remember it does not
    survive a reconnect (`gdbserver.cpp:121`, `:143`).
-3. **Treat a timeout as fatal to the connection**, not as a recoverable error.
-   Reconnect and renegotiate; do not send another request on a socket whose
-   reply queue you have lost track of.
+3. **Account for what the stub still owes you after a timeout** — an ACK, a
+   reply, or both — and drain exactly that before sending anything else. Do
+   not send another request on a socket whose reply queue you have lost track
+   of, and if you cannot establish where the stream sits, refuse to answer at
+   all rather than guess.
 4. **Do not assume `?` is read-only.** It stops the CPU (`gdbserver.cpp:314-318`).
 5. **Never assume a `Z0` is live.** Always `Z0` then `c`.
 6. Expect `S05` and nothing else — no `T` packets, no signal other than
    SIGTRAP, no `swbreak`/`hwbreak` annotation, regardless of what `qSupported`
    advertises.
+
+`dbxdebug`'s own `GDBClient` implements 1 and 3: unrequested stop replies go to
+`pending_stops`, an abandoned exchange is drained before the next packet is
+sent, and a drain that cannot complete marks the client permanently unusable.
+It still runs in ACK mode, so 2 remains available and unused. Any other client
+written against this stub has to do the same work itself.
 
 ### If you are changing the servers
 
