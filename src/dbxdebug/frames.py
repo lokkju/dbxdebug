@@ -14,27 +14,31 @@ single-stepping. Neither needs a breakpoint, and this module sets none.
 Addresses. Every read here goes through `addressing.linear(ss, off)`. This
 package computes linear addresses and the hardened DOSBox-X stub takes them
 directly; `addressing.bp_addr` deliberately raises rather than encoding a
-packed `(seg << 16) | off` far pointer. The probe scripts this module's
-domain knowledge came from (`probe_frame_unwind.py` in the
-powerbasic-decompile tree) predate that and argue at length about whether a
-linear `cs*16 + off` "also fires" for `Z0`. That argument is dead here: no
-breakpoints, no packed pointers.
+packed `(seg << 16) | off` far pointer. The probe script this module's
+domain knowledge came from -- an earlier consumer of this protocol, in a
+downstream project, written against an older stub -- predates that and
+argues at length about whether a linear `cs*16 + off` "also fires" for
+`Z0`. That argument is dead here: no breakpoints, no packed pointers.
 
-The `word()` retry, deliberately not reproduced. `probe_frame_unwind.py`
-carries a helper that reads the same two bytes up to four times "until two
+The `word()` retry, deliberately not reproduced. That earlier probe carries
+a helper that reads the same two bytes up to four times "until two
 consecutive reads agree", with the comment that "a single `m` right after a
 run of packets has been seen to come back with the previous response's
 payload". That is a real observation someone made against a live stub, and
 it is recorded here so it is not lost. We do not replicate the workaround:
-it doubles the round-trips on every single word, and, worse, it would
-silently paper over a genuine protocol desync instead of surfacing it. Note
-carefully what is and is not being claimed -- the observation predates the
-hardening pass on both the stub and `GDBClient` (which now negotiates no-ack
-mode), but nobody has demonstrated that the desync was fixed, only that we
-decline to work around it blind. So: `walk_frames` reads each frame exactly
-once via `GDBClient.read_memory`. If a live integration test ever reproduces
-a stale-payload read, that is a bug in the client or the stub and must be
-fixed there, not compensated for in this module.
+it doubles the round-trips on every single word and, worse, it would
+silently paper over a genuine protocol desync instead of surfacing it --
+note that two identical consecutive requests mask a one-packet lag
+perfectly, so "until two consecutive reads agree" would have looked like it
+worked whether or not the stream had shifted. Note carefully what is and is
+not being claimed: nobody has demonstrated that the desync was fixed.
+`GDBClient` assumes strict request/response, does not negotiate no-ack
+mode, and never resynchronises its stream, so an unsolicited stop reply or
+a timed-out request shifts every later reply by one packet -- tracked as
+lokkju/dbxdebug#4 and #5, with live tests in
+`tests/integration/test_live_session.py`. So: `walk_frames` reads each frame
+exactly once via `GDBClient.read_memory`. A stale-payload read is a bug in
+the client or the stub and must be fixed there, not compensated for here.
 """
 
 import struct
@@ -203,6 +207,14 @@ def steps_out(gdb: GDBLike, timeout: float = 10.0, max_steps: int = 100_000) -> 
     stops there, one or more instructions early. Distinguishing that from a
     real return needs instruction decoding or a breakpoint on the return
     address; this module does neither.
+
+    Active breakpoints are a hazard, and this function does not guard
+    against them: it removes none and expects none to be armed. `GDBClient`
+    assumes strict request/response, so a breakpoint hit during one of these
+    single steps makes the stub emit an extra, UNSOLICITED stop reply --
+    which the client then reads where it expects the ACK or the reply to its
+    next request, desyncing the connection permanently and silently
+    (lokkju/dbxdebug#4). Clear every breakpoint before calling this.
 
     Two more consequences worth knowing. The check runs AFTER each step, so
     this always executes at least one instruction. And the rule assumes the
