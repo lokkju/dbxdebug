@@ -33,9 +33,11 @@ HEADLESS_ENV = {"SDL_VIDEODRIVER": "dummy", "SDL_AUDIODRIVER": "dummy"}
 SESSION_LABEL = "dbxdebug_it"
 
 # Wall seconds any single GDB packet exchange may take before the socket
-# raises. `GDBClient` sets no timeout of its own, so without this a stub that
-# accepts a command and never answers -- `c` with a breakpoint that never
-# fires, say -- would hang the whole test run instead of failing one test.
+# raises. `GDBClient` arms `gdb.DEFAULT_TIMEOUT` itself now, so this is an
+# OVERRIDE these tests state explicitly rather than their only protection
+# from a stub that accepts a command and never answers -- `c` with a
+# breakpoint that never fires, say. Written out here so that changing the
+# package's default cannot quietly change how long a wedged run takes.
 GDB_SOCKET_TIMEOUT = 30.0
 
 
@@ -85,7 +87,8 @@ def make_session(dosbox_binary: Path) -> Iterator[Callable[..., DosboxSession]]:
 
     Yields:
         A callable taking `DosboxSession` keyword arguments and returning a
-        started session with its GDB socket timeout already armed. Each
+        started session with `GDB_SOCKET_TIMEOUT` armed over whatever the
+        client's own default would have been. Each
         call launches its own emulator, so a test that wants two sessions
         gets two independent ones.
     """

@@ -45,10 +45,11 @@ registry directory (default `~/.cache/dbxdebug-sessions`).
 
 ```python
 with DosboxSession(mounts={"c": host_dir}, env=HEADLESS, label="mywork") as session:
-    # Arm a read deadline immediately: GDBClient sets none of its own, so an
-    # unanswered packet would otherwise hang forever (lokkju/dbxdebug#4).
-    if session.gdb is not None and session.gdb.sock is not None:
-        session.gdb.sock.settimeout(30.0)
+    # GDBClient arms a 30s read deadline of its own, so an unanswered packet
+    # raises GDBTimeoutError rather than hanging. Override it only if that
+    # bound is wrong for your workload:
+    #     if session.gdb is not None and session.gdb.sock is not None:
+    #         session.gdb.sock.settimeout(120.0)
 
     # Readiness OBSERVED, not assumed. Returns seconds, or None on timeout or
     # on a dead process -- check it.
@@ -105,9 +106,9 @@ assert qmp is not None
 qmp.debug_break_on_exec(True)      # arms AND activates immediately
 qmp.type_text("PROG\r")            # "\r" and "\n" both map to the ret key
 
-# Learn that the CPU stopped over QMP, NOT over GDB. The break fires an
-# unsolicited $S05 that permanently desyncs the GDB client
-# (lokkju/dbxdebug#5). QMP is a separate socket and is undisturbed.
+# Wait for the stop over QMP: a separate socket, undisturbed by the break.
+# The break fires an unsolicited $S05 on the GDB connection, which the client
+# queues on gdb.pending_stops rather than reading as an answer.
 import time
 deadline = time.time() + 60
 while time.time() < deadline and qmp.query_status()["running"]:
@@ -115,9 +116,12 @@ while time.time() < deadline and qmp.query_status()["running"]:
 assert qmp.query_status()["running"] is False
 ```
 
-**The GDB connection is spent from here.** Do not try to recover it. If you
-need GDB state at the program's entry point, the clean alternative is an
-ordinary breakpoint (recipe 5), whose stop reply answers your own `c`.
+**The GDB connection survives this.** Drain the unrequested stop with
+`gdb.take_pending_stops()` — it returns the queued stop replies and empties
+the queue — and carry on reading registers and memory. If you would rather
+not deal with an out-of-band stop at all, the alternative is an ordinary
+breakpoint (recipe 5), whose stop reply answers your own `c` and is returned
+to you directly.
 
 > **UNVERIFIED.** Halting GDB *before* arming, so the eventual `S05` answers a
 > pending `continue_execution()`, is plausible from the source — QMP input
@@ -181,8 +185,9 @@ outright while the guest runs rather than risk a torn read — you get a
 `QMPError` mentioning "stopped".
 
 **Halt with `gdb.halt()`, not `qmp.stop()`,** if you will also talk GDB: while
-the emulator is QMP-stopped the GDB stub does not answer at all, and the client
-has no read timeout, so that combination deadlocks.
+the emulator is QMP-stopped the GDB stub does not answer at all, so every GDB
+request in that combination burns the read timeout and raises
+`GDBTimeoutError`.
 
 Server-side file variant, for a dump you do not want on the wire:
 
@@ -190,13 +195,14 @@ Server-side file variant, for a dump you do not want on the wire:
 path = qmp.memdump(0x0, 0x100000, file="/tmp/lowmem.bin")   # -> the path
 ```
 
-Small reads are fine over GDB — but **check the length you got back**, which is
-the one cheap symptom of a desync visible from outside:
+Small reads are fine over GDB. The client resynchronises after an abandoned
+reply and refuses outright when it cannot, so a short read is no longer the
+only symptom you have — but checking the length is still cheap:
 
 ```python
 want = 16
 got = gdb.read_memory(0xFFFF0, want)
-assert len(got) == want, "GDB stream is out of sync; tear the session down"
+assert len(got) == want
 ```
 
 ---
@@ -225,7 +231,8 @@ target's calling convention.
 
 ```python
 # Clear every breakpoint FIRST. A breakpoint hit during one of these single
-# steps emits an unsolicited stop reply that permanently desyncs the client.
+# steps emits an unsolicited stop reply; the client queues it rather than
+# desyncing, but the stop you get is not the step you asked for.
 assert gdb.remove_breakpoint(body_addr)
 
 steps_out(gdb, timeout=20.0)     # -> the final step's stop reply, as bytes
@@ -358,14 +365,13 @@ qmpserver port = 4444
 from dbxdebug import GDBClient, QMPClient
 
 with GDBClient(port=2159) as gdb, QMPClient(port=4444) as qmp:
-    gdb.sock.settimeout(30.0)
     gdb.read_registers()
     qmp.type_text("DIR\r")
 ```
 
 Both clients connect (and, for GDB, complete the `qSupported` handshake)
-inside `__init__` — there is no separate `.connect()`, and no `timeout`
-parameter on either.
+inside `__init__` — there is no separate `.connect()`. `GDBClient` takes a
+`timeout` (30 s by default, applied to every read); `QMPClient` has none.
 
 You get no ephemeral ports, no workdir isolation, no registry entry and no
 guaranteed teardown here. Prefer a `DosboxSession` whenever you are the one
