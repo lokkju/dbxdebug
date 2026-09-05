@@ -62,6 +62,11 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Agent worktrees live under .claude/worktrees/ INSIDE this repo, so a bare
+# `ruff check .` from the root lints other branches' in-progress code and
+# reports their errors as this tree's. pyright already scopes itself via
+# `include`; ruff needs telling.
+extend-exclude = [".claude"]
 
 [tool.ruff.lint]
 select = [
