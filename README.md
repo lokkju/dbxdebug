@@ -48,7 +48,7 @@ For working on dbxdebug itself, `uv sync`.
 ## Quick start
 
 ```python
-from dbxdebug.session import DosboxSession
+from dbxdebug import DosboxSession
 
 # Headless by default: no window, no keyboard focus, no audio device.
 # Pass headless=False when you want to watch the guest.
@@ -209,10 +209,36 @@ old build fails at `start()` rather than at the first breakpoint.
 | `dbxdebug.video` / `.html` / `.capture_io` | `DOSVideoTools`, HTML rendering, `ScreenRecorder`, `load_capture` |
 | `dbxdebug.keyboard` / `.dbx_kbd` | key-chord helpers and constants (`CTRL_C`, `ctrl_key`, `DBX_KEY`, ...) |
 
-`dbxdebug/__init__.py` re-exports the clients, the video tools, and the
-keyboard helpers. It does **not** yet re-export `DosboxSession`, `addressing`,
-`frames`, `registry`, `paths` or `doctor` -- import those from their modules,
-as every example here does ([#7](https://github.com/lokkju/dbxdebug/issues/7)).
+### The export rule
+
+Every module declares its supported surface in `__all__`, and
+`dbxdebug/__init__.py` re-exports the union of the **library** modules'
+`__all__`. So everything in the table above except the last three rows'
+worth of command machinery is importable straight from `dbxdebug`:
+
+```python
+from dbxdebug import DosboxSession, GDBClient, QMPClient, linear, walk_frames
+```
+
+The exceptions are `dbxdebug.cli`, `dbxdebug.registry` and `dbxdebug.doctor`
+-- the `dbxdebug` command's own machinery. They act on the host's whole set
+of sessions rather than on the one you launched, and their names mean
+nothing unqualified: a package root should not own `run`, `reap`,
+`list_sessions` or `free_port`. Import those from their modules:
+
+```python
+from dbxdebug.registry import list_sessions, reap
+from dbxdebug import doctor
+
+report = doctor.run()
+```
+
+Leaving `cli` out is also what keeps `import dbxdebug` free of `click`.
+
+Module-path imports keep working everywhere, and the examples below use
+whichever form reads better in context -- `addressing.bp_addr` says more
+about `bp_addr` than a bare name does. `tests/test_exports.py` holds the
+root to the union so the two cannot drift.
 
 ### Locating the emulator
 

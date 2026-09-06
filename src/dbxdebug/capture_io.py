@@ -11,6 +11,13 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+__all__ = [
+    "ScreenRecorder",
+    "get_capture_path",
+    "load_capture",
+    "save_capture",
+]
+
 if TYPE_CHECKING:
     from .video import DOSVideoTools
 

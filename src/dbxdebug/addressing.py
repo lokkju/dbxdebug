@@ -21,6 +21,17 @@ still calls it, and a loud failure here is the entire point.
 
 from collections.abc import Sequence
 
+__all__ = [
+    "CS_INDEX",
+    "EIP_INDEX",
+    "PackedAddressError",
+    "REAL_MODE_CEILING",
+    "bp_addr",
+    "linear",
+    "linear_pc",
+    "parse_address",
+]
+
 # Index of the CS register within a GDB register list.
 CS_INDEX = 10
 

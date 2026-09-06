@@ -2,6 +2,16 @@
 HTML generation utilities for DOS video analysis.
 """
 
+__all__ = [
+    "CP437_MAP",
+    "VGA_COLORS",
+    "VGA_COLOR_NAMES",
+    "analyze_dos_video_colors",
+    "char_to_html",
+    "dos_video_to_html",
+    "save_dos_video_html",
+]
+
 # VGA color palette (RGB values)
 VGA_COLORS = [
     "#000000",  # 0: Black

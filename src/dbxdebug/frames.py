@@ -51,6 +51,15 @@ from typing import Protocol
 
 from . import addressing
 
+__all__ = [
+    "FRAME_RECORD_SIZE",
+    "Frame",
+    "FrameWalkError",
+    "GDBLike",
+    "steps_out",
+    "walk_frames",
+]
+
 # Words read from the frame record at [BP]: saved BP, return offset,
 # return segment.
 FRAME_RECORD_SIZE = 6

@@ -47,6 +47,17 @@ from loguru import logger
 from .addressing import linear_pc, parse_address
 from .utils import parse_x86_address
 
+__all__ = [
+    "DEFAULT_TIMEOUT",
+    "GDBClient",
+    "GDBDesyncError",
+    "GDBTimeoutError",
+    "IncompatibleStubError",
+    "LINEAR_BREAKPOINTS_CAPABILITY",
+    "REGISTER_NAMES",
+    "looks_like_stop_reply",
+]
+
 # Wall seconds any single socket operation -- the connect included -- may
 # block before it raises. Without one, a packet the stub never answers hangs
 # the caller forever, which is easy to reach by accident: while the emulator
