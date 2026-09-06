@@ -71,7 +71,16 @@ target-version = "py311"
 # `ruff check .` from the root lints other branches' in-progress code and
 # reports their errors as this tree's. pyright already scopes itself via
 # `include`; ruff needs telling.
-extend-exclude = [".claude"]
+extend-exclude = [
+    ".claude",
+    # ruff formats Python inside Markdown code blocks, and it wants to
+    # restretch the aligned trailing comments in our docs samples. CI runs
+    # `ruff format --check src/ tests/` and the pre-commit hook is scoped to
+    # `types_or: [python, pyi]`, so neither ever saw this -- only a bare
+    # `ruff format --check .` did, which made the repo look broken to anyone
+    # running the obvious command. Excluded so all three agree.
+    "*.md",
+]
 
 [tool.ruff.lint]
 select = [
