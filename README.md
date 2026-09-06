@@ -274,17 +274,22 @@ steps_out(gdb)                            # single-step until the current frame 
 BP, a saved BP that is not strictly above the current one (which is also what
 terminates a cyclic chain), a short or failed read, or `max_depth`.
 
-`steps_out` is **a heuristic over SP**, with bounds worth knowing before you
-rely on it. It records the entry BP and steps until `SP & 0xFFFF` is strictly
-greater than `BP + 2` -- past the return-address slot, which only the `ret`
-itself reaches, not the `pop bp` or `leave` before it. Consequences:
+`steps_out` reads the frame's own return address once, then steps until the
+CPU is **at that address with the return slot popped**: `IP` equal to
+`[BP+2]`, and either `CS` unchanged with `SP >= BP+4` (a near return) or `CS`
+equal to `[BP+4]` with `SP >= BP+6` (a far one). Both halves matter -- SP
+alone stops early on a callee that raises SP without returning
+(`pop ax / add sp,N / jmp ax`), and the return address alone would accept a
+callee merely branching through the caller's code. Nothing is decoded; every
+value compared already arrives with each step's register read. Consequences:
 
 * it raises `FrameWalkError` if `SP > BP` on entry (no frame pointer
-  established, or a stale BP) rather than returning after a single step;
-* a callee that pops BP and jumps to a shared epilogue popping further
-  registers raises SP past `BP+2` while still inside the callee, and this
-  stops there, early. Telling that apart from a real return needs instruction
-  decoding, which this does not do;
+  established, or a stale BP) rather than returning after a single step, and
+  likewise for a `BP` so near the top of SS that no return SP would fit in 16
+  bits;
+* a return address that never arrives -- a guest that rewrites its own return
+  slot -- runs to `timeout`/`max_steps` and **raises**, naming the address it
+  was waiting for. It does not stop somewhere plausible;
 * called at a procedure's first instruction, before the prologue has run, BP
   still belongs to the caller and this measures the caller's frame;
 * **clear every breakpoint first.** A breakpoint hit during one of these steps

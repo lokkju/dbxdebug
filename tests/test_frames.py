@@ -248,6 +248,18 @@ def test_walk_frames_returns_nothing_for_a_zero_bp():
     assert walk_frames(gdb) == []
 
 
+# The frame every `steps_out` test below steps out of: BP=0x1000, called
+# NEAR from CS=0x1234 with the instruction after the `call` at 0x010D, and
+# an argument word left at [BP+4] where a far call would have put its
+# return segment. The entry CS matters now -- `steps_out` requires CS:IP to
+# reach the recorded return address, not just SP to clear the return slot.
+FRAME_BP = 0x1000
+CALLER_CS = 0x1234
+RETURN_OFF = 0x010D
+NEAR_FRAME_MEMORY = {linear(SS, FRAME_BP): frame_bytes(0x1200, RETURN_OFF, 0x9999)}
+INSIDE_CALLEE = {"ebp": FRAME_BP, "esp": 0x0FF0, "eip": 0x0117, "cs": CALLER_CS, "ss": SS}
+
+
 def test_steps_out_waits_for_the_near_ret_not_the_pop_bp():
     """`mov sp,bp / pop bp / ret`: `pop bp` lands on BP+2 and must not stop the walk.
 
@@ -255,8 +267,13 @@ def test_steps_out_waits_for_the_near_ret_not_the_pop_bp():
     the CPU still on the callee's `ret`.
     """
     gdb = FakeGDB(
-        {"ebp": 0x1000, "esp": 0x0FF0, "ss": SS},
-        step_script=[{"esp": 0x1000}, {"esp": 0x1002}, {"esp": 0x1004}],
+        INSIDE_CALLEE,
+        NEAR_FRAME_MEMORY,
+        step_script=[
+            {"esp": 0x1000, "eip": 0x0119},  # mov sp,bp
+            {"esp": 0x1002, "eip": 0x011A},  # pop bp
+            {"esp": 0x1004, "eip": RETURN_OFF},  # ret
+        ],
     )
 
     reply = steps_out(gdb)
@@ -266,10 +283,15 @@ def test_steps_out_waits_for_the_near_ret_not_the_pop_bp():
 
 
 def test_steps_out_waits_for_the_far_retf():
-    """A far return pops offset and segment, leaving SP at BP+6."""
+    """A far return pops offset and segment, leaving SP at BP+6 and CS at [BP+4]."""
     gdb = FakeGDB(
-        {"ebp": 0x1000, "esp": 0x0FF0, "ss": SS},
-        step_script=[{"esp": 0x1000}, {"esp": 0x1002}, {"esp": 0x1006}],
+        INSIDE_CALLEE,
+        NEAR_FRAME_MEMORY,
+        step_script=[
+            {"esp": 0x1000, "eip": 0x0119},  # mov sp,bp
+            {"esp": 0x1002, "eip": 0x011A},  # pop bp
+            {"esp": 0x1006, "eip": RETURN_OFF, "cs": 0x9999},  # retf
+        ],
     )
 
     reply = steps_out(gdb)
@@ -281,8 +303,13 @@ def test_steps_out_waits_for_the_far_retf():
 def test_steps_out_waits_for_a_ret_n():
     """`ret N` also discards N bytes of arguments, leaving SP at BP+4+N."""
     gdb = FakeGDB(
-        {"ebp": 0x1000, "esp": 0x0FF0, "ss": SS},
-        step_script=[{"esp": 0x1000}, {"esp": 0x1002}, {"esp": 0x1008}],
+        INSIDE_CALLEE,
+        NEAR_FRAME_MEMORY,
+        step_script=[
+            {"esp": 0x1000, "eip": 0x0119},  # mov sp,bp
+            {"esp": 0x1002, "eip": 0x011A},  # pop bp
+            {"esp": 0x1008, "eip": RETURN_OFF},  # ret 4
+        ],
     )
 
     reply = steps_out(gdb)
@@ -294,14 +321,41 @@ def test_steps_out_waits_for_a_ret_n():
 def test_steps_out_waits_for_the_ret_after_a_leave():
     """`leave` is `mov sp,bp / pop bp` in one instruction, so it lands on BP+2."""
     gdb = FakeGDB(
-        {"ebp": 0x1000, "esp": 0x0FF0, "ss": SS},
-        step_script=[{"esp": 0x1002}, {"esp": 0x1004}],
+        INSIDE_CALLEE,
+        NEAR_FRAME_MEMORY,
+        step_script=[
+            {"esp": 0x1002, "eip": 0x011A},  # leave
+            {"esp": 0x1004, "eip": RETURN_OFF},  # ret
+        ],
     )
 
     reply = steps_out(gdb)
 
     assert reply == b"S05"
     assert gdb.steps == 2
+
+
+def test_steps_out_does_not_stop_where_the_callee_merely_reaches_the_return_offset():
+    """CS:IP at the return address with the frame still live is not a return.
+
+    A callee whose own code passes through the caller's return offset --
+    the same segment, an offset it happens to branch to -- has not
+    returned, and SP still sitting inside the frame is what says so.
+    """
+    gdb = FakeGDB(
+        INSIDE_CALLEE,
+        NEAR_FRAME_MEMORY,
+        step_script=[
+            {"esp": 0x0FF0, "eip": RETURN_OFF},  # branched there, frame intact
+            {"esp": 0x1002, "eip": 0x011A},  # leave
+            {"esp": 0x1004, "eip": RETURN_OFF},  # ret -- this is the return
+        ],
+    )
+
+    reply = steps_out(gdb)
+
+    assert reply == b"S05"
+    assert gdb.steps == 3
 
 
 def test_steps_out_rejects_a_bp_that_does_not_describe_the_current_frame():
@@ -327,8 +381,12 @@ def test_steps_out_rejects_a_stale_bp_below_sp():
 def test_steps_out_accepts_a_frame_with_no_locals():
     """`SP == BP` is legal: `push bp / mov bp,sp` with nothing pushed after it."""
     gdb = FakeGDB(
-        {"ebp": 0x1000, "esp": 0x1000, "ss": SS},
-        step_script=[{"esp": 0x1002}, {"esp": 0x1004}],
+        {**INSIDE_CALLEE, "esp": FRAME_BP},
+        NEAR_FRAME_MEMORY,
+        step_script=[
+            {"esp": 0x1002, "eip": 0x011A},  # pop bp
+            {"esp": 0x1004, "eip": RETURN_OFF},  # ret
+        ],
     )
 
     reply = steps_out(gdb)
@@ -353,3 +411,78 @@ def test_steps_out_gives_up_when_the_timeout_expires():
         steps_out(gdb, timeout=0.0)
 
     assert gdb.steps == 1
+
+
+def test_walk_frames_wraps_a_frame_record_around_the_end_of_the_segment():
+    """A record straddling SS:FFFF continues at SS:0000, as a real CPU addresses it."""
+    record = frame_bytes(0x0000, 0xAAAA, 0x1111)
+    memory = {
+        linear(SS, 0xFFFE): record[:2],
+        linear(SS, 0x0000): record[2:],
+        # What a non-wrapping read would pick up instead: the bytes that
+        # simply follow the segment, which are NOT part of the frame.
+        linear(SS, 0xFFFE) + 2: b"\xde\xad\xbe\xef",
+    }
+    gdb = FakeGDB({"ebp": 0xFFFE, "ss": SS}, memory)
+
+    assert walk_frames(gdb) == [Frame(bp=0xFFFE, return_off=0xAAAA, return_seg=0x1111, depth=0)]
+
+
+def test_steps_out_keeps_stepping_through_a_shared_epilogue_that_pops_past_the_slot():
+    """SP past `BP+2` inside the callee is not a return; only the return address is.
+
+    The shape: `pop bp` lands on `BP+2`, then the callee pops the return
+    address into a register, discards its arguments, and jumps to it --
+    `pop ax / add sp,6 / jmp ax`. SP crosses `BP+2` two instructions before
+    control actually leaves the frame, and the old `SP > BP+2` rule stopped
+    there, still inside the callee, reporting a return that had not
+    happened.
+    """
+    memory = {linear(SS, 0x1000): frame_bytes(0x1200, 0x010D, 0x9999)}
+    gdb = FakeGDB(
+        {"ebp": 0x1000, "esp": 0x0FF0, "eip": 0x0117, "cs": 0x1234, "ss": SS},
+        memory,
+        step_script=[
+            {"esp": 0x1000, "eip": 0x0119},  # mov sp,bp
+            {"esp": 0x1002, "eip": 0x011A},  # pop bp      -> SP == BP+2
+            {"esp": 0x1004, "eip": 0x011B},  # pop ax      -> SP past BP+2, still inside
+            {"esp": 0x100A, "eip": 0x011E},  # add sp,6
+            {"esp": 0x100A, "eip": 0x010D},  # jmp ax      -> now at the return address
+        ],
+    )
+
+    reply = steps_out(gdb)
+
+    assert reply == b"S05"
+    assert gdb.steps == 5
+
+
+def test_steps_out_raises_when_the_return_address_is_never_reached():
+    """A frame whose recorded return address never arrives fails loudly.
+
+    The old rule returned a plausible-looking stop reply the moment SP rose
+    past `BP+2`. There is no correct answer to give here, so the only
+    honest outcome is an error that names what was expected and what was
+    seen.
+    """
+    memory = {linear(SS, 0x1000): frame_bytes(0x1200, 0x010D, 0x9999)}
+    gdb = FakeGDB(
+        {"ebp": 0x1000, "esp": 0x0FF0, "eip": 0x0117, "cs": 0x1234, "ss": SS},
+        memory,
+        step_script=[{"esp": 0x1010, "eip": 0x0200}],
+    )
+
+    with pytest.raises(FrameWalkError, match=r"1234:010d"):
+        steps_out(gdb, max_steps=20)
+
+    assert gdb.steps == 20
+
+
+def test_steps_out_rejects_a_frame_too_close_to_the_top_of_the_segment():
+    """`BP >= 0xFFFC` puts every return SP out of a 16-bit register's reach."""
+    gdb = FakeGDB({"ebp": 0xFFFC, "esp": 0xFFF0, "ss": SS})
+
+    with pytest.raises(FrameWalkError, match="top of the stack segment"):
+        steps_out(gdb)
+
+    assert gdb.steps == 0

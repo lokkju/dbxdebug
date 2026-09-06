@@ -5,7 +5,9 @@ tests prove the library actually drives an emulator: that the stub advertises
 what `GDBClient` demands of it, that `eip` really is an offset, that a
 breakpoint above 64 KB really fires, that `memdump` really refuses while the
 CPU runs, and that `frames.steps_out` really stops after a 16-bit epilogue's
-`ret` rather than on it.
+`ret` rather than on it -- and, against a second staged program, that it is
+not fooled by an epilogue that pops the return address off the stack three
+instructions before control leaves the frame.
 
 Four of them are about the bulk-read path, which is the biggest performance
 difference this package makes and the one thing a fake cannot establish:
@@ -156,6 +158,66 @@ FRAME_STAMP_TIMEOUT = 40.0
 # segment it names holds FRAME.COM -- see the check that uses these.
 COM_LOAD_OFFSET = 0x100
 FRAME_COM_SIGNATURE = FRAME_COM[:10]
+
+# A second hand-assembled .COM, this one with the epilogue shape the SP-only
+# rule got wrong: the callee pops the return address into a register, drops
+# its argument, and jumps to it. SP crosses BP+2 three instructions before
+# control leaves the frame.
+#
+#   0100  31 C0        xor ax,ax
+#   0102  8E C0        mov es,ax
+#   0104  8C C8        mov ax,cs
+#   0106  26 A3 02 05  mov es:[0502],ax   ; stamp CS, at its own address
+#   010A  53           push bx            ; one word of "argument"
+#   010B  E8 05 00     call 0113
+#   010E  EB FA        jmp 010A           ; <- where control really returns
+#   0110  90 90 90     nop nop nop        ; padding, never executed
+#   0113  55           push bp            ; prologue
+#   0114  89 E5        mov bp,sp
+#   0116  83 EC 04     sub sp,4           ; four bytes of locals
+#   0119  90           nop                ; <- breakpoint: prologue is done
+#   011A  89 EC        mov sp,bp          ; epilogue
+#   011C  5D           pop bp             ; SP lands on BP+2 here
+#   011D  58           pop ax             ; SP = BP+4: PAST the slot, still inside
+#   011E  83 C4 02     add sp,2           ; discard the argument, SP = BP+6
+#   0121  FF E0        jmp ax             ; only THIS leaves the frame
+EPILOG_COM = bytes(
+    [
+        0x31, 0xC0,
+        0x8E, 0xC0,
+        0x8C, 0xC8,
+        0x26, 0xA3, 0x02, 0x05,
+        0x53,
+        0xE8, 0x05, 0x00,
+        0xEB, 0xFA,
+        0x90, 0x90, 0x90,
+        0x55,
+        0x89, 0xE5,
+        0x83, 0xEC, 0x04,
+        0x90,
+        0x89, 0xEC,
+        0x5D,
+        0x58,
+        0x83, 0xC4, 0x02,
+        0xFF, 0xE0,
+    ]
+)  # fmt: skip
+
+EPILOG_COM_NAME = "EPILOG.COM"
+EPILOG_STAMP_ADDRESS = 0x502
+EPILOG_BODY_OFFSET = 0x119
+EPILOG_AFTER_CALL_OFFSET = 0x10E
+# Where the SP-only rule stopped: the instruction after `pop ax`, which is
+# the first place SP is past BP+2 -- and is three instructions short of the
+# frame actually being left.
+EPILOG_EARLY_STOP_OFFSET = 0x11E
+EPILOG_COM_SIGNATURE = EPILOG_COM[:10]
+
+# Bounds for the hand-rolled single-step loop that reproduces the early
+# stop. Generous because a timer interrupt taken mid-epilogue drops the CPU
+# into an ISR that runs for thousands of instructions before `iret`.
+EPILOG_MAX_STEPS = 50_000
+EPILOG_STEP_TIMEOUT = 30.0
 
 # A .COM that terminates the instant it starts: at the .COM entry offset a
 # lone `ret` returns to PSP:0000, which holds the INT 20h that DOS puts
@@ -647,6 +709,89 @@ def test_steps_out_returns_past_a_real_16_bit_ret(
     after = gdb.read_registers()
     assert gdb.linear_pc() == linear(cs, FRAME_AFTER_CALL_OFFSET)
     assert (after["esp"] & 0xFFFF) == frame_bp + 4, "SP did not clear the return-address slot"
+
+
+def test_steps_out_is_not_fooled_by_a_shared_epilogue_that_pops_past_the_slot(
+    make_session: Callable[..., DosboxSession], tmp_path: Path
+) -> None:
+    """`steps_out` steps through a callee that raises SP without returning.
+
+    The staged .COM ends with `pop bp / pop ax / add sp,2 / jmp ax`: the
+    return address leaves the stack three instructions before control
+    leaves the frame. This test proves both halves against real guest code
+    -- first by single-stepping by hand to the place the old `SP > BP + 2`
+    rule stopped, and showing the CPU is still inside the callee there;
+    then by letting `steps_out` run the same epilogue and land on the
+    instruction after the `call`.
+    """
+    drive = tmp_path / "c"
+    drive.mkdir()
+    (drive / EPILOG_COM_NAME).write_bytes(EPILOG_COM)
+    session = make_session(
+        mounts={"c": drive},
+        autoexec=[f"mount c {drive}", "c:", EPILOG_COM_NAME],
+    )
+    gdb, _ = clients(session)
+
+    deadline = time.time() + FRAME_STAMP_TIMEOUT
+    cs = 0
+    while not cs and time.time() < deadline:
+        cs = struct.unpack("<H", gdb.read_memory(EPILOG_STAMP_ADDRESS, 2))[0]
+        if not cs:
+            time.sleep(0.2)
+    assert cs, f"{EPILOG_COM_NAME} never ran: no CS stamp at {EPILOG_STAMP_ADDRESS:#x}"
+    loaded = gdb.read_memory(linear(cs, COM_LOAD_OFFSET), len(EPILOG_COM_SIGNATURE))
+    assert loaded == EPILOG_COM_SIGNATURE, (
+        f"the word at {EPILOG_STAMP_ADDRESS:#x} is {cs:#06x}, but "
+        f"{cs:04X}:{COM_LOAD_OFFSET:04X} does not hold {EPILOG_COM_NAME}"
+    )
+
+    body = linear(cs, EPILOG_BODY_OFFSET)
+    gdb.halt()
+
+    # Part one: where the SP-only rule stopped. Step by hand until SP first
+    # clears the return slot, then look at where the CPU actually is.
+    assert gdb.set_breakpoint(body)
+    assert gdb.continue_execution() == b"S05"
+    assert gdb.linear_pc() == body
+    assert gdb.remove_breakpoint(body)
+    frame_bp = gdb.read_registers()["ebp"] & 0xFFFF
+    step_deadline = time.time() + EPILOG_STEP_TIMEOUT
+    early_pc = None
+    for _ in range(EPILOG_MAX_STEPS):
+        gdb.step()
+        registers = gdb.read_registers()
+        if (registers["esp"] & 0xFFFF) > frame_bp + 2:
+            early_pc = gdb.linear_pc()
+            break
+        assert time.time() < step_deadline, "the epilogue never raised SP past BP+2"
+    assert early_pc == linear(cs, EPILOG_EARLY_STOP_OFFSET), (
+        "SP first cleared the return slot somewhere other than the expected "
+        f"instruction: {early_pc} vs {linear(cs, EPILOG_EARLY_STOP_OFFSET)}"
+    )
+    assert early_pc != linear(cs, EPILOG_AFTER_CALL_OFFSET), (
+        "the frame HAS been left where SP first clears the return slot, so "
+        "this .COM no longer reproduces the shape under test"
+    )
+
+    # Part two: the real thing. The program loops forever, so break on the
+    # body again to reach the next call with a fresh frame.
+    assert gdb.set_breakpoint(body)
+    assert gdb.continue_execution() == b"S05"
+    assert gdb.linear_pc() == body
+    assert gdb.remove_breakpoint(body)
+    entry = gdb.read_registers()
+    frame_bp = entry["ebp"] & 0xFFFF
+    walked = walk_frames(gdb, max_depth=1)
+    assert walked and walked[0].return_off == EPILOG_AFTER_CALL_OFFSET
+
+    steps_out(gdb, timeout=EPILOG_STEP_TIMEOUT)
+
+    after = gdb.read_registers()
+    assert gdb.linear_pc() == linear(cs, EPILOG_AFTER_CALL_OFFSET), (
+        "steps_out stopped inside the callee's shared epilogue"
+    )
+    assert (after["esp"] & 0xFFFF) == frame_bp + 6, "SP did not clear the argument too"
 
 
 def test_unsolicited_stop_reply_from_break_on_exec_is_queued_not_read_as_a_reply(

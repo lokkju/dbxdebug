@@ -59,9 +59,12 @@ from .dbx_kbd import (
 )
 from .frames import (
     FRAME_RECORD_SIZE,
+    MAX_STEPPABLE_FRAME_BP,
+    SEGMENT_SIZE,
     Frame,
     FrameWalkError,
     GDBLike,
+    read_frame_record,
     steps_out,
     walk_frames,
 )
@@ -194,6 +197,9 @@ __all__ = [
     "FrameWalkError",
     "GDBLike",
     "FRAME_RECORD_SIZE",
+    "SEGMENT_SIZE",
+    "MAX_STEPPABLE_FRAME_BP",
+    "read_frame_record",
     # -- Locating the emulator: dbxdebug.paths -------------------------
     "find_dosbox_x",
     "configured_dosbox_x_path",
