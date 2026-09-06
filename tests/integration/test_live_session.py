@@ -25,6 +25,13 @@ old, broken behaviour until the framing rework landed; their docstrings say
 what changed. Fake-socket coverage of the same paths, including the ones a
 live emulator will not produce on demand, is in `tests/test_gdb_framing.py`.
 
+Two of them are about mouse input, and they are deliberately asymmetric:
+buttons are asserted end to end -- each `mouse_click` sets its own bit in
+INT 33h function 03h -- while motion is asserted only as far as it actually
+goes. Headless, DOSBox-X rewrites the pointer position from the host cursor
+on every injected move, so the reported position is evidence of nothing; the
+guest's own fn 0Ch movement callback firing once per `mouse_move` is.
+
 Every test gets its OWN emulator, launched and torn down by the fixtures in
 `conftest.py`. They are marked `integration` and are excluded from the
 default `pytest` run (see `addopts` in `pyproject.toml`), because CI has no
@@ -1013,3 +1020,256 @@ def test_the_default_timeout_bounds_a_request_the_stub_will_not_answer(
         qmp.cont()
 
     assert "mffff0" in str(caught.value), caught.value
+
+
+# --- Mouse input ------------------------------------------------------
+#
+# A hand-assembled .COM that turns DOSBox-X's built-in INT 33h driver into a
+# host-readable probe. It resets the driver, installs its own movement
+# callback, then polls forever, stamping what it sees into low memory where
+# `gdb.read_memory` can pick it up while the guest keeps running:
+#
+#   0100  31 C0              xor ax,ax
+#   0102  8E C0              mov es,ax          ; ES = 0, the stamp segment
+#   0104  31 C0              xor ax,ax
+#   0106  CD 33              int 33h            ; fn 00h: reset, AX=FFFF if present
+#   0108  26 A3 18 05        mov es:[0518],ax   ; stamp "is there a driver"
+#   010C  0E                 push cs
+#   010D  07                 pop es             ; ES = CS, for the fn 0Ch handler
+#   010E  B8 0C 00           mov ax,000Ch
+#   0111  B9 01 00           mov cx,1           ; call mask: movement only
+#   0114  BA 42 01           mov dx,0142h       ; ES:DX = the handler below
+#   0117  CD 33              int 33h
+#   0119  31 C0              xor ax,ax
+#   011B  8E C0              mov es,ax          ; ES = 0 again
+#   011D  B8 03 00      loop:mov ax,3
+#   0120  CD 33              int 33h            ; fn 03h: position and buttons
+#   0122  26 89 0E 10 05     mov es:[0510],cx   ; x
+#   0127  26 89 16 12 05     mov es:[0512],dx   ; y
+#   012C  26 09 1E 14 05     or  es:[0514],bx   ; buttons, ACCUMULATED
+#   0131  2E A1 48 01        mov ax,cs:[0148]
+#   0135  26 A3 1E 05        mov es:[051E],ax   ; movement callback count
+#   0139  26 C7 06 16 05 5A A5   mov word es:[0516],0A55Ah   ; "I am running"
+#   0140  EB DB              jmp loop
+#   0142  2E FF 06 48 01 hnd:inc word cs:[0148]
+#   0147  CB                 retf
+#   0148  00 00         cnt:dw 0
+#
+# The buttons are OR-ed rather than assigned because a press is transient:
+# an assignment would only be caught if the host happened to read between
+# the press and the release. The movement counter exists because the
+# REPORTED position cannot be used as evidence -- see the motion test.
+MOUSE_COM = bytes(
+    [
+        0x31, 0xC0,
+        0x8E, 0xC0,
+        0x31, 0xC0,
+        0xCD, 0x33,
+        0x26, 0xA3, 0x18, 0x05,
+        0x0E,
+        0x07,
+        0xB8, 0x0C, 0x00,
+        0xB9, 0x01, 0x00,
+        0xBA, 0x42, 0x01,
+        0xCD, 0x33,
+        0x31, 0xC0,
+        0x8E, 0xC0,
+        0xB8, 0x03, 0x00,
+        0xCD, 0x33,
+        0x26, 0x89, 0x0E, 0x10, 0x05,
+        0x26, 0x89, 0x16, 0x12, 0x05,
+        0x26, 0x09, 0x1E, 0x14, 0x05,
+        0x2E, 0xA1, 0x48, 0x01,
+        0x26, 0xA3, 0x1E, 0x05,
+        0x26, 0xC7, 0x06, 0x16, 0x05, 0x5A, 0xA5,
+        0xEB, 0xDB,
+        0x2E, 0xFF, 0x06, 0x48, 0x01,
+        0xCB,
+        0x00, 0x00,
+    ]
+)  # fmt: skip
+
+MOUSE_COM_NAME = "MOUSE.COM"
+# Where the probe stamps what it sees. All in the first 64 KB, clear of the
+# IVT and the BDA, and clear of the addresses the frame tests stamp.
+MOUSE_POS_ADDRESS = 0x510  # two words: x, y
+MOUSE_BUTTONS_ADDRESS = 0x514  # accumulated button mask
+MOUSE_ALIVE_ADDRESS = 0x516  # 0xA55A once the poll loop is running
+MOUSE_DRIVER_ADDRESS = 0x518  # INT 33h fn 00h's AX
+MOUSE_MOVES_ADDRESS = 0x51E  # movement callback invocations
+MOUSE_ALIVE_STAMP = 0xA55A
+# INT 33h fn 00h answers 0xFFFF when a driver is installed. DOSBox-X's is
+# built in, so this holds with no guest driver loaded.
+INT33_DRIVER_PRESENT = 0xFFFF
+# Bit each button occupies in INT 33h fn 03h's BL.
+MOUSE_BUTTON_BITS = {"left": 0b001, "right": 0b010, "middle": 0b100}
+# Wall seconds to wait for the probe to boot and reach its poll loop.
+MOUSE_PROBE_TIMEOUT = 40.0
+# Wall seconds to wait for one injected event to be drained by the emulation
+# thread and observed by the guest. Input is QUEUED, not applied inline, so
+# some wait is unavoidable; this is generous because the value being read is
+# monotonic and the loop below stops as soon as it changes.
+MOUSE_EVENT_TIMEOUT = 5.0
+# How long `mouse_click` holds the button. Longer than the default so a
+# loaded host cannot drain press and release in the same pass, which would
+# leave the guest's poll with nothing to see.
+MOUSE_CLICK_HOLD = 0.2
+
+
+def start_mouse_probe(
+    make_session: Callable[..., DosboxSession], tmp_path: Path
+) -> tuple[DosboxSession, GDBClient, QMPClient]:
+    """Launch a guest running `MOUSE.COM` and wait for its poll loop.
+
+    Args:
+        make_session: The session factory fixture.
+        tmp_path: Where to build the mounted drive.
+
+    Returns:
+        The started session and its two clients, with the probe confirmed
+        running and DOSBox-X's INT 33h driver confirmed present.
+    """
+    drive = tmp_path / "c"
+    drive.mkdir()
+    (drive / MOUSE_COM_NAME).write_bytes(MOUSE_COM)
+    session = make_session(
+        mounts={"c": drive},
+        autoexec=[f"mount c {drive}", "c:", MOUSE_COM_NAME],
+    )
+    gdb, qmp = clients(session)
+
+    deadline = time.time() + MOUSE_PROBE_TIMEOUT
+    alive = 0
+    while alive != MOUSE_ALIVE_STAMP and time.time() < deadline:
+        (alive,) = struct.unpack("<H", gdb.read_memory(MOUSE_ALIVE_ADDRESS, 2))
+        if alive != MOUSE_ALIVE_STAMP:
+            time.sleep(0.2)
+    assert alive == MOUSE_ALIVE_STAMP, f"{MOUSE_COM_NAME} never reached its poll loop"
+
+    (driver,) = struct.unpack("<H", gdb.read_memory(MOUSE_DRIVER_ADDRESS, 2))
+    assert driver == INT33_DRIVER_PRESENT, (
+        f"INT 33h fn 00h answered {driver:#06x}: no mouse driver in the guest, "
+        "so nothing here would be observable either way"
+    )
+    return session, gdb, qmp
+
+
+def read_word(gdb: GDBClient, address: int) -> int:
+    """Read one little-endian word of guest memory.
+
+    Args:
+        gdb: A connected GDB client.
+        address: Linear address to read.
+
+    Returns:
+        The word at `address`.
+    """
+    (value,) = struct.unpack("<H", gdb.read_memory(address, 2))
+    return value
+
+
+def await_word(
+    gdb: GDBClient, address: int, expected: int, timeout: float = MOUSE_EVENT_TIMEOUT
+) -> int:
+    """Poll a word until it reaches `expected`, or the timeout runs out.
+
+    Waiting is not optional: `input-send-event` only QUEUES its events, and
+    the queue is drained on the emulation thread, so the guest sees them a
+    tick or more after the command has been answered. Returning the last
+    value read rather than raising leaves the caller's own assertion to
+    produce the failure message, with the value that was actually there.
+
+    Args:
+        gdb: A connected GDB client.
+        address: Linear address of the word to watch.
+        expected: The value being waited for.
+        timeout: Wall seconds to keep polling.
+
+    Returns:
+        `expected` once seen, otherwise the last value read.
+    """
+    deadline = time.time() + timeout
+    value = read_word(gdb, address)
+    while value != expected and time.time() < deadline:
+        time.sleep(0.1)
+        value = read_word(gdb, address)
+    return value
+
+
+def test_mouse_buttons_reach_a_dos_guest(
+    make_session: Callable[..., DosboxSession], tmp_path: Path
+) -> None:
+    """Each `mouse_click` sets exactly its own button bit in INT 33h fn 03h.
+
+    This is the part of `input-send-event`'s mouse support a DOS guest
+    really sees. No guest mouse driver is loaded: DOSBox-X's own INT 33h
+    driver answers, which is why a `mouse_click` is worth making at all.
+
+    The guest OR-s the button mask into `MOUSE_BUTTONS_ADDRESS` rather than
+    assigning it, so a press that is over before the host next reads still
+    counts. Each button is therefore checked as a bit that appears and never
+    goes away, and the three are driven in sequence to prove the mapping is
+    per-button rather than "any click sets something".
+    """
+    _session, gdb, qmp = start_mouse_probe(make_session, tmp_path)
+
+    assert read_word(gdb, MOUSE_BUTTONS_ADDRESS) == 0, "a button was already down"
+
+    seen = 0
+    for button, bit in MOUSE_BUTTON_BITS.items():
+        qmp.mouse_click(button, hold_time=MOUSE_CLICK_HOLD)
+        seen |= bit
+        assert await_word(gdb, MOUSE_BUTTONS_ADDRESS, seen) == seen, (
+            f"clicking {button!r} did not set bit {bit:#05b} in INT 33h fn 03h"
+        )
+
+
+def test_mouse_motion_reaches_the_guests_int33_callback(
+    make_session: Callable[..., DosboxSession], tmp_path: Path
+) -> None:
+    """`mouse_move` fires the guest's movement callback once per call.
+
+    What is asserted here is deliberately narrow, because the obvious
+    assertion -- that the reported pointer POSITION moved by the delta --
+    would pass for the wrong reason. Headless, DOSBox-X rewrites the INT 33h
+    position from the host cursor on every injected move: the decision
+    between "accumulate the delta" and "snap to the host cursor" is made by
+    a variable assigned only inside the SDL mouse-motion handler, which never
+    runs with `SDL_VIDEODRIVER=dummy`, and the host cursor is at the origin.
+    Observed live: the pointer sat at (320, 96) after the driver reset, went
+    to (0, 0) on the first `mouse_move`, and stayed there for every delta and
+    direction. `[sdl] mouse_emulation` does not change it -- the conf value
+    reaches that variable through the same handler. `mouse_move`'s docstring
+    carries the same warning for callers.
+
+    The event itself does arrive, which is what this pins: the guest's own
+    fn 0Ch movement handler is invoked exactly once per `mouse_move` and not
+    at all while the host sends nothing, so the command is wired through to
+    the guest rather than swallowed. The count is also proof against the
+    idle case -- a counter that drifted on its own would fail the first
+    assertion.
+    """
+    _session, gdb, qmp = start_mouse_probe(make_session, tmp_path)
+
+    assert read_word(gdb, MOUSE_MOVES_ADDRESS) == 0, (
+        "the movement callback fired with no input sent"
+    )
+
+    for expected in (1, 2, 3):
+        qmp.mouse_move(25, 15)
+        assert await_word(gdb, MOUSE_MOVES_ADDRESS, expected) == expected, (
+            "the guest's INT 33h movement callback did not fire for this mouse_move"
+        )
+
+    # The position is read only to record what it actually does, and to keep
+    # the claim above honest if DOSBox-X ever changes: a delta of 75 x 45
+    # mickeys left the pointer pinned at the origin.
+    x, y = struct.unpack("<HH", gdb.read_memory(MOUSE_POS_ADDRESS, 4))
+    assert (x, y) == (0, 0), (
+        f"the INT 33h pointer is at ({x}, {y}), not the origin -- injected motion may "
+        "now move it, in which case mouse_move's headless warning is out of date"
+    )
+
+    # Buttons are a separate path: no click was sent, so none is reported,
+    # and the movement counter did not come from one.
+    assert read_word(gdb, MOUSE_BUTTONS_ADDRESS) == 0

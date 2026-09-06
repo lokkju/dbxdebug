@@ -29,7 +29,7 @@ The entry points, in the order a caller meets them:
 
 - ``DosboxSession`` -- launch an emulator, connect to it, tear it down.
 - ``GDBClient`` -- memory, registers, breakpoints, stepping.
-- ``QMPClient`` -- keys, screendumps, save states, run control.
+- ``QMPClient`` -- keys, mouse, screendumps, save states, run control.
 - ``DOSVideoTools`` and the ``html`` helpers -- read and render the screen.
 - ``linear`` / ``parse_address`` and ``walk_frames`` -- make sense of what
   the two clients hand back.
@@ -129,7 +129,7 @@ from .paths import (
     configured_dosbox_x_path,
     find_dosbox_x,
 )
-from .qmp import CpuNotStoppedError, QMPClient, QMPError
+from .qmp import MOUSE_BUTTONS, CpuNotStoppedError, QMPClient, QMPError
 from .session import (
     DEFAULT_CONF,
     DEFAULT_SDL_OUTPUT,
@@ -182,6 +182,7 @@ __all__ = [
     "QMPClient",
     "QMPError",
     "CpuNotStoppedError",
+    "MOUSE_BUTTONS",
     # -- Addresses and frames: dbxdebug.addressing, dbxdebug.frames ----
     "linear",
     "linear_pc",

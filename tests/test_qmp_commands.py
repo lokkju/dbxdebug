@@ -7,6 +7,10 @@ this file. These tests drive the rest -- `memdump`, `screendump`,
 `debug-break-on-exec`, and `quit` -- against a fake socket, with no emulator
 involved. Each test asserts the exact JSON sent and how the reply is
 decoded.
+
+`TestMouse` covers the other half of `input-send-event`. The key branch was
+already wrapped; the `rel` and `btn` branches were not, so `mouse_move`,
+`mouse_button` and `mouse_click` are pinned here too.
 """
 
 import base64
@@ -259,3 +263,125 @@ class TestQuit:
         result = client.quit()
         assert fake.sent == [{"execute": "quit"}]
         assert result is None
+
+
+class TestMouse:
+    """`input-send-event`'s `rel` and `btn` branches, on the wire.
+
+    What the server accepts is narrower than the QEMU protocol these events
+    are borrowed from: `qmp.cpp` handles `key`, `rel` and `btn` and nothing
+    else, maps exactly three button names, and answers `{"return": {}}` even
+    for an event it dropped. These tests pin the JSON the client sends and
+    the one place it refuses to send anything at all.
+    """
+
+    def test_move_sends_both_axes_in_one_command(self, monkeypatch: pytest.MonkeyPatch):
+        """One round-trip, and one guest-visible motion: the server sums them."""
+        client, fake = _connect(monkeypatch, {"return": {}})
+        client.mouse_move(50, -20)
+        assert fake.sent == [
+            {
+                "execute": "input-send-event",
+                "arguments": {
+                    "events": [
+                        {"type": "rel", "data": {"axis": "x", "value": 50}},
+                        {"type": "rel", "data": {"axis": "y", "value": -20}},
+                    ]
+                },
+            }
+        ]
+
+    def test_move_sends_a_zero_axis_rather_than_omitting_it(self, monkeypatch: pytest.MonkeyPatch):
+        """A single-axis move is still two events, so the JSON stays predictable.
+
+        A zero `rel` costs nothing: the server adds it into the same summed
+        motion it was going to queue for the other axis.
+        """
+        client, fake = _connect(monkeypatch, {"return": {}})
+        client.mouse_move(7, 0)
+        assert fake.sent[0]["arguments"]["events"] == [
+            {"type": "rel", "data": {"axis": "x", "value": 7}},
+            {"type": "rel", "data": {"axis": "y", "value": 0}},
+        ]
+
+    @pytest.mark.parametrize("button", ["left", "right", "middle"])
+    def test_button_down_and_up_for_every_supported_button(
+        self, monkeypatch: pytest.MonkeyPatch, button: str
+    ):
+        client, fake = _connect(monkeypatch, {"return": {}}, {"return": {}})
+        client.mouse_button(button, True)
+        client.mouse_button(button, False)
+        assert fake.sent == [
+            {
+                "execute": "input-send-event",
+                "arguments": {
+                    "events": [{"type": "btn", "data": {"button": button, "down": down}}]
+                },
+            }
+            for down in (True, False)
+        ]
+
+    @pytest.mark.parametrize("button", ["wheel-up", "wheel-down", "side", "extra", "LEFT", ""])
+    def test_unknown_button_raises_instead_of_being_sent(
+        self, monkeypatch: pytest.MonkeyPatch, button: str
+    ):
+        """The server would answer success and drop it, so nothing is sent.
+
+        `qmp.cpp`'s button lookup falls through to a warning and `continue`,
+        then replies `{"return": {}}` for the command as a whole. Forwarding
+        the name would turn "the guest never saw this" into a successful
+        call.
+        """
+        client, fake = _connect(monkeypatch)
+        with pytest.raises(ValueError, match="unknown mouse button"):
+            client.mouse_button(button, True)
+        assert fake.sent == []
+
+    def test_click_is_a_separate_press_and_release(self, monkeypatch: pytest.MonkeyPatch):
+        """Two commands, not one batch: the queue is drained in a single pass.
+
+        Batched, press and release would be applied in the same emulation
+        tick and a guest polling INT 33h would never see the button down.
+        """
+        client, fake = _connect(monkeypatch, {"return": {}}, {"return": {}})
+        client.mouse_click(hold_time=0)
+        assert fake.sent == [
+            {
+                "execute": "input-send-event",
+                "arguments": {
+                    "events": [{"type": "btn", "data": {"button": "left", "down": True}}]
+                },
+            },
+            {
+                "execute": "input-send-event",
+                "arguments": {
+                    "events": [{"type": "btn", "data": {"button": "left", "down": False}}]
+                },
+            },
+        ]
+
+    def test_click_defaults_to_the_left_button(self, monkeypatch: pytest.MonkeyPatch):
+        client, fake = _connect(monkeypatch, {"return": {}}, {"return": {}})
+        client.mouse_click(hold_time=0)
+        assert all(
+            command["arguments"]["events"][0]["data"]["button"] == "left" for command in fake.sent
+        )
+
+    def test_click_holds_for_the_requested_time(self, monkeypatch: pytest.MonkeyPatch):
+        """The hold is what makes a click observable, so it is not optional.
+
+        `time.sleep` is patched rather than waited on: what matters is that
+        the press and the release are separated by the requested interval,
+        not that the test spends it.
+        """
+        slept: list[float] = []
+        monkeypatch.setattr("dbxdebug.qmp.time.sleep", slept.append)
+        client, _fake = _connect(monkeypatch, {"return": {}}, {"return": {}})
+        client.mouse_click("right", hold_time=0.25)
+        assert slept == [0.25]
+
+    def test_unknown_button_is_rejected_by_click_too(self, monkeypatch: pytest.MonkeyPatch):
+        client, fake = _connect(monkeypatch)
+        with pytest.raises(ValueError, match="unknown mouse button"):
+            client.mouse_click("wheel-up")
+        assert fake.sent == []
