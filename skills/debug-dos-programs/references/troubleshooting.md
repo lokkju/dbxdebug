@@ -173,8 +173,9 @@ client holds the connection, and that the emulator is not QMP-stopped.
   immediately activates* a breakpoint at the next program's entry point,
   regardless of whether any GDB client asked to continue, and the resulting
   `$S05#b8` lands where the client expects its own `+` ACK. It is now diverted
-  to `gdb.pending_stops`; drain it with `gdb.take_pending_stops()`. The read
-  that follows still gets its own bytes.
+  to `gdb.pending_stops`; drain it with `gdb.take_pending_stops()`, or wait on
+  it with `gdb.wait_for_stop(timeout=...)`. The read that follows still gets
+  its own bytes.
 - **A single timed-out request.** What the stub still owes is drained before
   the next packet is sent, so one timeout no longer shifts anything.
 

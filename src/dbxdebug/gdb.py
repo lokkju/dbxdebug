@@ -27,12 +27,19 @@ diverts stop replies that arrive where none was requested into
 complete, the client marks itself unusable rather than guessing: a loud
 failure on every later call beats a plausible wrong answer.
 
+Reading `pending_stops` polls the socket itself, without blocking, so a stop
+nobody asked for reaches the queue whether or not anything else is talking
+GDB -- and `wait_for_stop` owns that poll loop. The poll is inert while
+anything is owed, which is what keeps it from stealing a reply in flight.
+
 There is deliberately no read-retry loop -- see `frames.py` for why retrying
 masks this fault instead of surfacing it.
 """
 
 import binascii
+import contextlib
 import socket
+import time
 from collections import deque
 
 from loguru import logger
@@ -277,21 +284,87 @@ class GDBClient:
         hold two stops from one exchange. Reading this property does not
         consume anything -- use `take_pending_stops` for that.
 
+        Reading it DOES read the socket, without blocking, so that asking
+        the question also answers it. Before that, the queue only filled as
+        a side effect of some other request passing through the framing
+        layer: an unsolicited `S05` sat unread in the kernel buffer, and a
+        caller polling this property directly never saw a stop that had
+        genuinely happened (lokkju/dbxdebug#18). The poll is skipped while
+        the stub owes a reply to a request already on the wire -- see
+        `_drain_unsolicited` -- so it can never take bytes that belong to
+        someone else's exchange.
+
         Returns:
             The queued stop reply payloads, oldest first, at most
             `MAX_PENDING_STOPS` of them.
         """
+        self._drain_unsolicited()
         return tuple(self._pending_stops)
 
     def take_pending_stops(self) -> list[bytes]:
         """Remove and return every queued unrequested stop reply.
 
+        Reads the socket first, without blocking, exactly as `pending_stops`
+        does -- a stop that has arrived but not yet been parsed is returned
+        here rather than requiring some unrelated read to shake it loose.
+
         Returns:
             The queued payloads, oldest first. The queue is left empty.
         """
+        self._drain_unsolicited()
         drained = list(self._pending_stops)
         self._pending_stops.clear()
         return drained
+
+    def wait_for_stop(self, timeout: float = 30.0, poll: float = 0.05) -> bytes | None:
+        """Poll until the CPU stops of its own accord, or `timeout` elapses.
+
+        Every consumer that arms a breakpoint needs this loop, and the one
+        that wrote its own got it wrong in a way nothing reported: it looped
+        on a queue that filled only when something else read the socket, so
+        it spun on a stop that had already happened and its caller concluded
+        the breakpoint had never fired (lokkju/dbxdebug#18). Owning the loop
+        here means there is one correct version of it.
+
+        This is for stops NOBODY asked for -- a QMP break-on-exec hit, say.
+        When the point is to run until the next breakpoint, `continue_execution`
+        sends `c` and waits for the reply that answers it; this does not
+        resume anything.
+
+        Args:
+            timeout: Maximum wall seconds to wait. 0 polls exactly once,
+                which is the cheap "has anything stopped?" question.
+            poll: Wall seconds to sleep between polls.
+
+        Returns:
+            The oldest queued stop reply, removed from the queue, or None if
+            none arrived in time. Any stop behind it stays queued.
+
+        Raises:
+            GDBDesyncError: If this client is unusable, or if the stub still
+                owes a reply to a request already on the wire. The socket
+                cannot be polled in that state without stealing that
+                request's own bytes, so waiting here would spin forever --
+                the exact failure this method exists to prevent. Finish or
+                abandon that exchange first; the next `_send_packet` drains
+                it.
+        """
+        self._ensure_usable()
+        if self._owed_ack or self._owed_reply:
+            raise GDBDesyncError(
+                f"Cannot wait for a stop while the stub still owes a reply to "
+                f"{self._last_sent!r}: polling the socket now would consume that "
+                f"request's own bytes. Complete that exchange first -- the next "
+                f"request drains an abandoned one."
+            )
+        deadline = time.monotonic() + timeout
+        while True:
+            self._drain_unsolicited()
+            if self._pending_stops:
+                return self._pending_stops.popleft()
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(poll)
 
     def _ensure_usable(self) -> None:
         """Raise if this client can no longer prove its stream position.
@@ -340,23 +413,26 @@ class GDBClient:
             raise ConnectionError("Connection closed")
         self.buffer += chunk
 
-    def _next_token(self) -> tuple[str, bytes]:
-        """Consume the next protocol token from the stream.
+    def _token_from_buffer(self) -> tuple[str, bytes] | None:
+        """Consume the next complete protocol token already in the buffer.
+
+        Splitting this out of `_next_token` is what lets the stream be read
+        without blocking: a token is only ever consumed once all of its bytes
+        are in hand, so a half-arrived `$S0` is left where it is rather than
+        being mangled by a reader that could not wait for the rest.
 
         Bytes that are neither an ACK, a NACK, nor the start of a packet are
         discarded, matching what the previous parser did with them.
 
         Returns:
             `("ack", b"")`, `("nack", b"")`, or `("packet", payload)` with
-            the payload's checksum already verified and acknowledged.
-
-        Raises:
-            GDBTimeoutError: If the stream stalls mid-token.
-            ConnectionError: If the peer closed the connection.
+            the payload's checksum already verified and acknowledged; None
+            when the buffer holds no complete token, leaving the incomplete
+            bytes buffered.
         """
         while True:
             if not self.buffer:
-                self._recv()
+                return None
 
             head = self.buffer[0:1]
             if head == b"+":
@@ -371,8 +447,7 @@ class GDBClient:
 
             hash_pos = self.buffer.find(b"#")
             if hash_pos == -1 or len(self.buffer) < hash_pos + 3:
-                self._recv()
-                continue
+                return None
 
             payload = self.buffer[1:hash_pos]
             checksum_bytes = self.buffer[hash_pos + 1 : hash_pos + 3]
@@ -388,6 +463,110 @@ class GDBClient:
                 return "packet", payload
             if not self._no_ack_mode:
                 self._write(b"-")
+
+    def _next_token(self) -> tuple[str, bytes]:
+        """Consume the next protocol token, blocking until one is complete.
+
+        Returns:
+            `("ack", b"")`, `("nack", b"")`, or `("packet", payload)` with
+            the payload's checksum already verified and acknowledged.
+
+        Raises:
+            GDBTimeoutError: If the stream stalls mid-token.
+            ConnectionError: If the peer closed the connection.
+        """
+        while True:
+            token = self._token_from_buffer()
+            if token is not None:
+                return token
+            self._recv()
+
+    def _recv_ready(self) -> bool:
+        """Append whatever is ALREADY waiting on the socket, without blocking.
+
+        Distinct from `_recv`, which waits for the stub to answer something
+        that was asked. Nothing here was asked for, so waiting would be
+        wrong: an empty kernel buffer is the ordinary case and must cost
+        nothing.
+
+        Returns:
+            True if bytes were appended to the read buffer, False if the
+            socket had none ready, the peer closed, or it is no longer
+            usable. Never raises -- callers are queue accessors, and a
+            connection that has gone away is a fact about the next real
+            request, not something to surface from reading a queue.
+        """
+        if self.sock is None:
+            return False
+        previous = self.sock.gettimeout()
+        try:
+            # 0.0 puts the socket in non-blocking mode, so an empty kernel
+            # buffer raises BlockingIOError instead of waiting. `recv` on a
+            # socket with data ready never blocks either way.
+            self.sock.settimeout(0.0)
+            chunk = self.sock.recv(4096)
+        except (BlockingIOError, TimeoutError):
+            return False
+        except OSError as exc:
+            logger.debug(f"Non-blocking poll of the GDB socket failed: {exc!r}")
+            return False
+        finally:
+            # Restored before anything else touches the socket -- the ACK
+            # `_token_from_buffer` writes must go out on a blocking socket.
+            with contextlib.suppress(OSError):  # the socket may have gone
+                self.sock.settimeout(previous)
+        if not chunk:
+            return False
+        self.buffer += chunk
+        return True
+
+    def _drain_unsolicited(self) -> None:
+        """Read anything the stub sent unprompted, without blocking.
+
+        This is what makes the stop queue self-servicing. The queue used to
+        fill only as a side effect of some OTHER request passing through the
+        framing layer, so a caller polling it directly never saw a stop that
+        had genuinely happened and spun forever (lokkju/dbxdebug#18).
+
+        It is a no-op -- deliberately, not defensively -- whenever the stub
+        still owes bytes for a request already on the wire. Those bytes
+        belong to that exchange: consuming an ACK here would strand
+        `_await_ack`, and consuming a reply here would hand the request's own
+        answer to the queue. The owed state is only ever set between
+        `_send_packet` and the matching `_read_packet` on the same thread, so
+        a caller between requests never trips this; a caller that abandoned
+        an exchange (a `GDBTimeoutError` it swallowed) does, and gets nothing
+        new rather than a corrupted stream. `wait_for_stop` reports that case
+        rather than spinning quietly through it.
+
+        Only complete tokens are consumed, so a stop reply that is still
+        arriving stays buffered and is picked up whole by the next poll or by
+        the next real read.
+        """
+        if self._unusable is not None or self.sock is None:
+            return
+        if self._owed_ack or self._owed_reply:
+            logger.debug(
+                f"Not polling for unsolicited stops: the stub still owes a reply "
+                f"to {self._last_sent!r}"
+            )
+            return
+        try:
+            while True:
+                while (token := self._token_from_buffer()) is not None:
+                    kind, payload = token
+                    if kind != "packet":
+                        # A stray ACK or NACK for an exchange already closed
+                        # out. Nothing is owed, so it answers nothing.
+                        continue
+                    if looks_like_stop_reply(payload):
+                        self._record_unsolicited(payload)
+                    else:
+                        logger.warning(f"Discarded an unrequested non-stop GDB packet: {payload!r}")
+                if not self._recv_ready():
+                    return
+        except OSError as exc:  # a write of the ACK on a socket that has gone
+            logger.debug(f"Stopped polling for unsolicited stops: {exc!r}")
 
     def _record_unsolicited(self, payload: bytes) -> None:
         """Queue a stop reply that arrived where none had been requested.

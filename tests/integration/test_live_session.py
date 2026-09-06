@@ -170,6 +170,12 @@ EXEC_LOOP_BAT = ":top\r\nEXITNOW\r\ngoto top\r\n"
 # Wall seconds to wait for an armed break-on-exec to actually stop the CPU.
 BREAK_ON_EXEC_TIMEOUT = 30.0
 
+# Wall seconds to poll `pending_stops` for a stop the CPU has ALREADY taken.
+# QMP has already reported the stop by the time this starts, so nothing is
+# being waited on but the client noticing -- generous only so a loaded
+# machine cannot make it flaky.
+PENDING_STOP_POLL_TIMEOUT = 10.0
+
 # Wall seconds allowed for the prompt to appear, and the bound the observed
 # time is checked against.
 PROMPT_TIMEOUT = 40.0
@@ -699,6 +705,101 @@ def test_unsolicited_stop_reply_from_break_on_exec_is_queued_not_read_as_a_reply
     assert stops, "the unsolicited stop reply was swallowed instead of queued"
     assert all(stop.startswith(b"S") or stop.startswith(b"T") for stop in stops), stops
     assert gdb.take_pending_stops() == []
+
+
+def test_polling_pending_stops_alone_sees_the_stop_with_no_intervening_read(
+    make_session: Callable[..., DosboxSession], tmp_path: Path
+) -> None:
+    """The queue must service itself: polling it is the only GDB traffic here.
+
+    The test above happens to read memory before it drains, so the framing
+    layer sees the unsolicited `S05` on the way past and the queue is full by
+    the time anyone looks. That ordering was load-bearing, and nothing said
+    so: a consumer that looped on `take_pending_stops()` alone spun forever
+    on a stop that had genuinely happened, then reported "no entry
+    breakpoint" against an emulator that had stopped exactly as asked
+    (lokkju/dbxdebug#18).
+
+    So this test issues NO GDB request between arming the break and draining
+    the queue -- the wait for the stop is done over QMP, which is a separate
+    socket and cannot disturb the GDB stream. It failed for as long as the
+    queue was only filled as a side effect of some other read.
+    """
+    drive = tmp_path / "c"
+    drive.mkdir()
+    (drive / EXIT_COM_NAME).write_bytes(EXIT_COM)
+    (drive / EXEC_LOOP_NAME).write_text(EXEC_LOOP_BAT, newline="")
+    session = make_session(
+        mounts={"c": drive},
+        autoexec=[f"mount c {drive}", "c:", EXEC_LOOP_NAME],
+    )
+    gdb, qmp = clients(session)
+
+    qmp.debug_break_on_exec(True)
+    deadline = time.time() + BREAK_ON_EXEC_TIMEOUT
+    while time.time() < deadline and qmp.query_status()["running"]:
+        time.sleep(0.2)
+    assert qmp.query_status()["running"] is False, (
+        f"break-on-exec never stopped the CPU within {BREAK_ON_EXEC_TIMEOUT}s; "
+        f"the guest's {EXEC_LOOP_NAME} loop may not be running"
+    )
+
+    # From here to the drain, the ONLY thing spoken to the GDB socket is the
+    # poll itself. Reading the property must not consume, so a stop seen here
+    # is still there for `take_pending_stops` below.
+    seen: tuple[bytes, ...] = ()
+    poll_deadline = time.time() + PENDING_STOP_POLL_TIMEOUT
+    while time.time() < poll_deadline:
+        seen = gdb.pending_stops
+        if seen:
+            break
+        time.sleep(0.1)
+    assert seen, (
+        f"polling `pending_stops` for {PENDING_STOP_POLL_TIMEOUT}s never saw a stop "
+        f"the CPU had already taken -- the queue is not servicing itself"
+    )
+    assert all(stop.startswith(b"S") or stop.startswith(b"T") for stop in seen), seen
+
+    assert gdb.take_pending_stops() == list(seen)
+    assert gdb.take_pending_stops() == []
+
+    # The stream is intact after all that polling: the reply to this read is
+    # its own, not something the poll left half-consumed.
+    assert gdb.read_memory(BIOS_RESET_VECTOR, len(BIOS_RESET_BYTES)) == BIOS_RESET_BYTES
+
+
+def test_wait_for_stop_returns_the_stop_it_was_waiting_on(
+    make_session: Callable[..., DosboxSession], tmp_path: Path
+) -> None:
+    """`wait_for_stop` owns the poll loop so no consumer has to write one.
+
+    Same live condition as the test above, consumed the way the package now
+    tells callers to consume it. Every consumer needs this loop; the one that
+    wrote its own is the reason lokkju/dbxdebug#18 exists.
+    """
+    drive = tmp_path / "c"
+    drive.mkdir()
+    (drive / EXIT_COM_NAME).write_bytes(EXIT_COM)
+    (drive / EXEC_LOOP_NAME).write_text(EXEC_LOOP_BAT, newline="")
+    session = make_session(
+        mounts={"c": drive},
+        autoexec=[f"mount c {drive}", "c:", EXEC_LOOP_NAME],
+    )
+    gdb, qmp = clients(session)
+
+    assert gdb.wait_for_stop(timeout=0.0) is None, "nothing has stopped yet"
+
+    qmp.debug_break_on_exec(True)
+    stop = gdb.wait_for_stop(timeout=BREAK_ON_EXEC_TIMEOUT)
+    assert stop is not None, (
+        f"wait_for_stop saw no stop within {BREAK_ON_EXEC_TIMEOUT}s of arming break-on-exec"
+    )
+    assert stop.startswith(b"S") or stop.startswith(b"T"), stop
+    assert qmp.query_status()["running"] is False
+
+    # Consumed, not merely observed.
+    assert gdb.pending_stops == ()
+    assert gdb.read_memory(BIOS_RESET_VECTOR, len(BIOS_RESET_BYTES)) == BIOS_RESET_BYTES
 
 
 def test_a_timed_out_request_does_not_shift_every_later_reply(

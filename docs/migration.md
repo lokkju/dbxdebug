@@ -449,22 +449,38 @@ gdb.take_pending_stops()          # [b'S05'] -- the stop, delivered once
 Note that a `Z0` breakpoint armed while free-running is inert and never was a
 trigger -- activation only happens on continue.
 
-**The queue is filled by the client's framing layer while it reads, not by the
-socket receiving anything.** Until you issue some GDB request, an unsolicited
-`S05` sits unread in the kernel buffer and `take_pending_stops()` returns
-empty. A poller written as "loop calling `take_pending_stops()` until it is
-non-empty" therefore spins forever on a stop that has genuinely happened:
+**The queue services itself** (was
+[#18](https://github.com/lokkju/dbxdebug/issues/18), fixed). Reading
+`pending_stops` or calling `take_pending_stops()` reads the socket first,
+without blocking, so asking the question also answers it:
 
 ```python
-gdb.take_pending_stops()          # () -- nothing has read the socket yet
-gdb.read_memory(0x400, 4)         # any request; the framing layer sees the S05
+qmp.debug_break_on_exec(True)
+# ... the break fires; no GDB request is issued at all ...
 gdb.take_pending_stops()          # (b'S05',)
 ```
 
-Give your poll loop a cheap read -- a few bytes of the BDA will do -- before
-taking the queue. `qmp.query_status()` on the separate QMP socket has no such
-ordering requirement and is the simpler signal when you are not otherwise
-talking GDB.
+Before that fix the queue filled only as a side effect of some OTHER request
+passing through the framing layer, so a poller written as "loop calling
+`take_pending_stops()` until it is non-empty" spun forever on a stop that had
+genuinely happened, and its caller concluded the breakpoint had never fired.
+A read interposed in the loop was the workaround; it is no longer needed.
+
+Better still, do not write the loop:
+
+```python
+stop = gdb.wait_for_stop(timeout=30.0)   # the payload, or None on timeout
+```
+
+`wait_for_stop` owns the poll and returns the oldest queued stop, removed
+from the queue. It does **not** resume anything -- it is for stops nobody
+asked for. It raises `GDBDesyncError` rather than spinning if the stub still
+owes a reply to a request already on the wire, because the socket cannot be
+polled in that state without stealing that request's own bytes; finish or
+abandon that exchange first (the next request drains an abandoned one).
+
+`qmp.query_status()` on the separate QMP socket is still a valid signal, and
+is the one to use when you are not otherwise talking GDB.
 
 **Trigger 2 -- a timed-out request.** The abandoned reply used to stay in the
 stream and be handed to the next request:
@@ -493,9 +509,10 @@ What a consumer should still do:
 * Do **not** add a read-retry loop. Two identical consecutive requests mask a
   one-packet lag perfectly, so retrying looks like it works whether or not the
   stream has shifted.
-* If you arm `debug_break_on_exec`, drain `gdb.take_pending_stops()` to learn
-  the CPU stopped -- after a read, per the ordering note above. Polling `qmp.query_status()` on the separate QMP socket
-  still works and is still the way to wait for it.
+* If you arm `debug_break_on_exec`, learn that the CPU stopped from
+  `gdb.wait_for_stop()`, or from `gdb.take_pending_stops()` in a loop of your
+  own -- both read the socket themselves now. Polling `qmp.query_status()` on
+  the separate QMP socket still works too.
 
 ### 5.3 One GDB client at a time (lokkju/dbxdebug#8, open)
 

@@ -27,19 +27,32 @@ repos:
     hooks:
       - id: gitleaks
 
-  # Ruff for linting and formatting
+  # Ruff for linting and formatting.
+  #
+  # This rev and the `ruff` floor in pyproject.toml are ONE version, pinned in
+  # two places, and they must be bumped together. Two ruffs run against this
+  # repo -- this hook on every commit, and the resolved dev environment in CI
+  # -- and when they drifted six minor versions apart they disagreed about
+  # formatting: 0.8.4 rewrote a multi-line `assert ..., "message"` into a shape
+  # 0.14.9's `--check` then rejected, so a commit blessed here was refused by
+  # CI and each tool undid the other (lokkju/dbxdebug#17). Neither reports its
+  # version in the diff it produces, which is what made that confusing.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.4
+    rev: v0.14.9
     hooks:
-      - id: ruff
+      # `ruff-check`, not `ruff`: the latter is a legacy alias in 0.14.x and
+      # says so on every run.
+      - id: ruff-check
         types_or: [python, pyi]
         args: [--fix]
       - id: ruff-format
         types_or: [python, pyi]
 
-  # Pyright for type checking
+  # Pyright for type checking. Same rule as ruff above: this rev and the
+  # `pyright` floor in pyproject.toml are one version in two places. A pyright
+  # that is stale here accepts code CI's newer one rejects.
   - repo: https://github.com/RobertCraigie/pyright-python
-    rev: v1.1.390
+    rev: v1.1.407
     hooks:
       - id: pyright
         additional_dependencies:
@@ -68,8 +81,10 @@ repos:
     hooks:
       - id: actionlint
 
-  # UV for dependency management - ensures uv.lock is synced
+  # UV for dependency management - ensures uv.lock is synced. Matched to the
+  # uv that resolved the current lockfile: this hook REWRITES uv.lock, so an
+  # older uv here can churn the file the developer's own uv just wrote.
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.7.13
+    rev: 0.9.21
     hooks:
       - id: uv-lock
