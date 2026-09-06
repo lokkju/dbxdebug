@@ -38,7 +38,7 @@ dev = [
     # uses -- and a floor low enough to resolve behind the hook lets the two
     # disagree about the same file (lokkju/dbxdebug#17).
     "ruff>=0.14.9",
-    "pyright>=1.1.407",
+    "pyright>=1.1.411",
     "pre-commit>=3.5.0",
 ]
 

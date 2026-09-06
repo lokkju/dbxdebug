@@ -52,7 +52,7 @@ repos:
   # `pyright` floor in pyproject.toml are one version in two places. A pyright
   # that is stale here accepts code CI's newer one rejects.
   - repo: https://github.com/RobertCraigie/pyright-python
-    rev: v1.1.407
+    rev: v1.1.411
     hooks:
       - id: pyright
         additional_dependencies:
