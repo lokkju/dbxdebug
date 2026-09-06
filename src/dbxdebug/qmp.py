@@ -6,6 +6,10 @@ Provides keyboard input injection via the QMP protocol:
 - key_down()/key_up(): Explicit press/release control
 - type_text(): Type a string of characters
 
+And mouse input, over the same `input-send-event` command:
+- mouse_move(): Relative pointer motion
+- mouse_button()/mouse_click(): Button press and release
+
 Also wraps the rest of the commands the DOSBox-X QMP server dispatches:
 memory and screen capture (memdump, screendump), save state control
 (savestate, loadstate), run control (stop, cont, system_reset,
@@ -22,6 +26,7 @@ from loguru import logger
 from .dbx_kbd import DBX_KEY, DBX_KEY_TO_QCODE, char_needs_shift, char_to_qcode
 
 __all__ = [
+    "MOUSE_BUTTONS",
     "CpuNotStoppedError",
     "QMPClient",
     "QMPError",
@@ -74,8 +79,17 @@ CPU_NOT_STOPPED_REMEDY = (
 )
 
 
+# The mouse buttons `qmp.cpp`'s `input-send-event` handler maps to a DOSBox-X
+# button id. Everything else -- QEMU's `wheel-up`/`wheel-down`, `side`,
+# `extra` -- hits the handler's `else` branch, which logs a warning, DROPS
+# the event, and still answers `{"return": {}}`. A client that just forwarded
+# the name would therefore report success for input the guest never sees, so
+# `mouse_button` validates against this tuple instead.
+MOUSE_BUTTONS: tuple[str, ...] = ("left", "right", "middle")
+
+
 class QMPClient:
-    """QEMU Monitor Protocol client for DOSBox-X keyboard input."""
+    """QEMU Monitor Protocol client for DOSBox-X keyboard and mouse input."""
 
     DEFAULT_PORT = 4444
 
@@ -274,6 +288,125 @@ class QMPClient:
                 self.key_press(qcode, 0.03)
 
             time.sleep(delay)
+
+    def mouse_move(self, dx: int, dy: int) -> None:
+        """
+        Move the guest pointer by a relative offset.
+
+        Both axes go out in ONE `input-send-event`, which is also how the
+        server wants them: it sums every `rel` event in a command into a
+        single motion before queueing it, so two axes cost one round-trip
+        and one guest-visible move rather than two of each.
+
+        Motion and buttons are never combined into one command, here or
+        anywhere in this client: the server sums the `rel` events and queues
+        the resulting motion AFTER every button event in the same command,
+        whatever order they were written in. A "move then click" batch would
+        therefore click at the OLD position and move afterwards.
+
+        Only relative motion exists. The server understands `rel` and
+        ignores `abs` -- QEMU's absolute-positioning event type is not
+        implemented in `qmp.cpp`, and an `abs` event is silently dropped
+        with a successful reply, so there is no `mouse_warp`/`mouse_to`
+        here to wrap it.
+
+        Queued, not immediate: like the key methods, this returns as soon as
+        the server has put the event on its input queue. The queue is drained
+        on the emulation thread (`QMP_ProcessPendingInputEvents`), so the
+        guest sees the motion on a later tick -- give it a moment before
+        reading anything back.
+
+        KNOWN LIMITATION -- motion has no effect on a headless emulator.
+        DOSBox-X decides between "accumulate the injected delta" and
+        "snap to wherever the host pointer is" using a mode variable that is
+        only ever assigned inside the SDL mouse-motion handler. Headless
+        (`SDL_VIDEODRIVER=dummy`, which is `DosboxSession`'s default) that
+        handler never runs, the variable keeps its "never emulate" default,
+        and the INT 33h pointer is rewritten to the host cursor's last known
+        position -- the origin -- on every injected move. Measured against a
+        guest polling INT 33h: the pointer went to (0, 0) on the first
+        `mouse_move` and stayed there for any delta, and the fn 0Bh mickey
+        counters stayed at zero as well. `[sdl] mouse_emulation` does not
+        change this, because the conf value reaches that variable only
+        through the same handler. Buttons are unaffected -- see
+        `mouse_button`.
+
+        Args:
+            dx: Horizontal offset. Positive is right.
+            dy: Vertical offset. Positive is down in QEMU's convention;
+                DOSBox-X applies its own `[sdl] vertical mouse` sense on
+                top, so do not rely on the sign to mean a screen direction.
+
+        Example:
+            >>> qmp.mouse_move(50, -20)
+        """
+        events = [
+            {"type": "rel", "data": {"axis": "x", "value": dx}},
+            {"type": "rel", "data": {"axis": "y", "value": dy}},
+        ]
+        self._send_command("input-send-event", {"events": events})
+
+    def mouse_button(self, button: str, down: bool) -> None:
+        """
+        Press or release one mouse button.
+
+        Queued, not immediate, exactly as `mouse_move` and the key methods
+        are: the reply means "accepted onto the input queue", and the
+        emulation thread applies it on a later tick.
+
+        Unlike motion, buttons DO reach a headless guest: a press sets the
+        bit that INT 33h function 03h reports in BL, and DOSBox-X's built-in
+        INT 33h driver is present without the guest loading any mouse
+        driver of its own. Verified live against all three buttons.
+
+        Args:
+            button: One of `MOUSE_BUTTONS` -- `"left"`, `"right"` or
+                `"middle"`.
+            down: True to press, False to release.
+
+        Raises:
+            ValueError: If `button` is not one the server maps. The server
+                would answer success and drop the event, so the check is
+                here rather than there.
+
+        Example:
+            >>> qmp.mouse_button("left", True)
+            >>> qmp.mouse_button("left", False)
+        """
+        if button not in MOUSE_BUTTONS:
+            raise ValueError(
+                f"unknown mouse button {button!r}; DOSBox-X maps only "
+                f"{', '.join(MOUSE_BUTTONS)} (it would accept and drop anything else)"
+            )
+        event = {"type": "btn", "data": {"button": button, "down": down}}
+        self._send_command("input-send-event", {"events": [event]})
+
+    def mouse_click(self, button: str = "left", hold_time: float = 0.05) -> None:
+        """
+        Press and release one mouse button, holding it in between.
+
+        Two commands with a wait between them, mirroring `key_press` rather
+        than batching both events into one `input-send-event`. A batch would
+        be delivered correctly -- button events keep their order within a
+        command -- but the whole queue is drained in a single pass on the
+        emulation thread, so press and release would land in the same tick
+        and a guest polling INT 33h would see no button pressed at any point
+        it looked.
+
+        Args:
+            button: One of `MOUSE_BUTTONS` (default `"left"`).
+            hold_time: Seconds to hold the button down (default 0.05).
+
+        Raises:
+            ValueError: If `button` is not one the server maps.
+
+        Example:
+            >>> qmp.mouse_click()
+            >>> qmp.mouse_click("right")
+        """
+        self.mouse_button(button, True)
+        time.sleep(hold_time)
+        self.mouse_button(button, False)
 
     def query_commands(self) -> list[str]:
         """

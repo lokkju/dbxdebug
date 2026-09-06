@@ -133,6 +133,30 @@ logs-and-skips a character it cannot map. For chords use
 `qmp.send_key(["ctrl", "c"])`, or the constants: `from dbxdebug import CTRL_C,
 ENTER, ESCAPE` (each is a list of qcodes).
 
+### Mouse input
+
+```python
+qmp.mouse_click("left")            # left / right / middle -- MOUSE_BUTTONS
+qmp.mouse_button("right", True)    # explicit press, with a matching release
+qmp.mouse_move(50, -20)            # relative motion only
+```
+
+Buttons work: DOSBox-X's built-in INT 33h driver reports them to the guest
+with no mouse driver loaded, and each button sets its own bit in fn 03h's BL.
+
+> **Motion does nothing in a headless session.** DOSBox-X rewrites the INT 33h
+> pointer position from the *host* cursor on every injected move, and headless
+> that cursor never leaves the origin, so the pointer snaps to (0, 0) and stays
+> there whatever delta you send. `[sdl] mouse_emulation` does not change it.
+> The event does reach the guest -- a program that installs an INT 33h fn 0Ch
+> movement handler sees it fire once per `mouse_move` -- but the position it
+> reads is not yours. Do not build a click-at-coordinates flow on this.
+
+There is no absolute positioning: the emulator's `input-send-event` handles
+`rel` and ignores `abs`, silently and with a successful reply. Unknown button
+names are ignored the same way, so `mouse_button` raises `ValueError` on one
+rather than reporting a success the guest never saw.
+
 ---
 
 ## 5. Set a breakpoint and stop on it

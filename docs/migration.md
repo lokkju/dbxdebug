@@ -353,7 +353,8 @@ were two loops was the first item of lokkju/dbxdebug#7.
 | `key_down(key) -> dict` / `key_up(key) -> dict` | `key_down(key) -> None` / `key_up(key) -> None` | Same `input-send-event` payload |
 | `key_press(key, hold_time=0.1) -> dict` | `key_press(key, hold_time=0.05) -> None` | **Default hold time halved** |
 | `type_text(text, delay=0.1)` | `type_text(text, delay=0.05)` | **Default delay halved.** Unmapped characters are logged and skipped rather than silently skipped; `\r`, `\n`, `\t`, space and shifted punctuation map the same |
-| `input_send_event(events) -> dict` | -- | No raw passthrough. Use `key_down`/`key_up` |
+| `input_send_event(events) -> dict` | -- | No raw passthrough. Use `key_down`/`key_up`, or the mouse methods below |
+| -- | `mouse_move(dx, dy)`, `mouse_button(button, down)`, `mouse_click(button='left', hold_time=0.05)` | New. Relative motion only (the server ignores `abs`), and only `left`/`right`/`middle` -- `MOUSE_BUTTONS` lists them, and anything else raises `ValueError` rather than being accepted and dropped. **Motion has no effect headless**; buttons do. See `mouse_move`'s docstring |
 | `query_commands() -> list` | `query_commands() -> list[str]` | Same |
 | `query_status() -> dict` | `query_status() -> dict` | **Returns the `return` payload, not the envelope**: `resp["return"]["running"]` becomes `status["running"]` |
 | `stop()`, `cont()`, `debug_break_on_exec(enabled)` | Same names | Same unwrapping change as `query_status` |

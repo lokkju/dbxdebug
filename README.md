@@ -408,6 +408,8 @@ with GDBClient() as gdb:                       # localhost:2159
 with QMPClient() as qmp:                       # localhost:4444
     qmp.send_key(CTRL_C)
     qmp.type_text("Hello World!")
+    qmp.mouse_click("left")                    # buttons reach the guest
+    qmp.mouse_move(50, -20)                    # motion does NOT, headless
 
 with DOSVideoTools() as video:                 # owns its own client
     lines = video.screen_dump()
