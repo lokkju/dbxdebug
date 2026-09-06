@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0](https://github.com/lokkju/dbxdebug/compare/v0.4.0...v0.5.0) (2026-09-06)
+
+
+### Features
+
+* **api:** derive the package root's exports from the modules' __all__ ([f4fbb2d](https://github.com/lokkju/dbxdebug/commit/f4fbb2d18a7a4b7c329c7593a26e39e99930b1c6)), closes [#7](https://github.com/lokkju/dbxdebug/issues/7)
+* **qmp:** add mouse input to QMPClient ([a25a356](https://github.com/lokkju/dbxdebug/commit/a25a356c19115d5ea12189aca3c221413602dc9f)), closes [#2](https://github.com/lokkju/dbxdebug/issues/2)
+
+
+### Bug Fixes
+
+* **frames:** end steps_out at the return address, and wrap segment reads ([40e2817](https://github.com/lokkju/dbxdebug/commit/40e28174473ada9997f650b84051cf296f72d0dd)), closes [#6](https://github.com/lokkju/dbxdebug/issues/6)
+* **gdb:** make the pending-stop queue service itself ([908eae0](https://github.com/lokkju/dbxdebug/commit/908eae0ea621ea460c4627a4f7d4320eaaace81a)), closes [#18](https://github.com/lokkju/dbxdebug/issues/18)
+
 ## [0.4.0](https://github.com/lokkju/dbxdebug/compare/v0.3.0...v0.4.0) (2026-09-05)
 
 
