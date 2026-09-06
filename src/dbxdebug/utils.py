@@ -4,6 +4,11 @@ Utility functions for address parsing and hex dumps.
 
 import re
 
+__all__ = [
+    "hexdump",
+    "parse_x86_address",
+]
+
 
 def parse_x86_address(address_str: str | int) -> int:
     """

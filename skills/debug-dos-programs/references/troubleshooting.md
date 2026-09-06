@@ -340,10 +340,10 @@ old build fails at `start()` rather than at the first breakpoint.
 
 **Cause, one of two.**
 
-1. `dbxdebug/__init__.py` re-exports the original client surface only. The
-   session, registry, addressing, frames, paths and doctor modules are
-   importable from their own modules and nowhere else (lokkju/dbxdebug#7).
-   Write `from dbxdebug.session import DosboxSession`.
+1. You are on a build from before lokkju/dbxdebug#7, where the root
+   re-exported the client surface only. `from dbxdebug.session import
+   DosboxSession` works on every version and is the portable spelling if you
+   have to support both.
 2. You installed the **published** release. PyPI's only release is 0.2.1 and
    it does not contain those modules at all. Confirm:
    ```bash

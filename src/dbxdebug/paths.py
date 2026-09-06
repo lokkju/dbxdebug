@@ -20,6 +20,13 @@ import os
 import shutil
 from pathlib import Path
 
+__all__ = [
+    "DEFAULT_DOSBOX_X_PATH",
+    "DOSBOX_X_ENV_VAR",
+    "configured_dosbox_x_path",
+    "find_dosbox_x",
+]
+
 # The only definition of the conventional checkout path in this package.
 # Used when DBXDEBUG_DOSBOX is unset and nothing is found on PATH either.
 DEFAULT_DOSBOX_X_PATH = str(Path.home() / "projects/eesystem/dosbox-x/src/dosbox-x")

@@ -7,8 +7,7 @@ those are constructed from read source, not from an observed run.
 Common preamble for every Python snippet:
 
 ```python
-from dbxdebug.session import DosboxSession
-from dbxdebug.addressing import linear
+from dbxdebug import DosboxSession, linear
 
 # Sessions are headless by default: no window, no keyboard focus. Pass
 # headless=False only when a human wants to watch the guest.

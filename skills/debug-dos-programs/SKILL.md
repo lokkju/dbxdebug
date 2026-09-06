@@ -56,7 +56,7 @@ Point it at a specific build with `DBXDEBUG_DOSBOX=/path/to/dosbox-x`.
 Always as a context manager. Never hand-roll a `subprocess.Popen`.
 
 ```python
-from dbxdebug.session import DosboxSession   # NOT `from dbxdebug import ...`
+from dbxdebug import DosboxSession   # or dbxdebug.session; both work
 
 with DosboxSession(mounts={"c": host_dir}) as session:
     ...

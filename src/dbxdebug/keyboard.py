@@ -7,6 +7,43 @@ keyboard operations using the QMP protocol.
 
 from .dbx_kbd import DBX_KEY, DBX_KEY_TO_QCODE
 
+__all__ = [
+    "ALT_F4",
+    "ALT_TAB",
+    "BACKSPACE",
+    "CTRL_A",
+    "CTRL_ALT_DEL",
+    "CTRL_C",
+    "CTRL_S",
+    "CTRL_V",
+    "CTRL_X",
+    "CTRL_Z",
+    "DELETE",
+    "DOWN",
+    "END",
+    "ENTER",
+    "ESCAPE",
+    "HOME",
+    "INSERT",
+    "LEFT",
+    "PAGE_DOWN",
+    "PAGE_UP",
+    "RIGHT",
+    "SPACE",
+    "TAB",
+    "UP",
+    "alt_key",
+    "ctrl_alt_key",
+    "ctrl_key",
+    "ctrl_shift_key",
+    "digit_key",
+    "function_key",
+    "get_qcode",
+    "key_list",
+    "number_keys",
+    "shift_key",
+]
+
 
 def get_qcode(key: DBX_KEY) -> str:
     """

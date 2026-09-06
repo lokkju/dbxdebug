@@ -17,6 +17,23 @@ from loguru import logger
 
 from .gdb import GDBClient
 
+__all__ = [
+    "BDA_COLUMN_COUNT",
+    "BDA_MODE",
+    "BDA_ROW_COUNT",
+    "BDA_TIMER_TICK",
+    "DEFAULT_SCREEN_HEIGHT",
+    "DEFAULT_SCREEN_WIDTH",
+    "DOSVideoTools",
+    "DOS_VIDEO_MEMORY_SIZE",
+    "DOS_VIDEO_PAGE_ONE",
+    "DOS_VIDEO_PAGE_TWO",
+    "TIMER_FREQUENCY",
+    "decode_text_screen",
+    "decode_vga_attribute",
+    "format_attribute_info",
+]
+
 # DOS video memory addresses
 DOS_VIDEO_PAGE_ONE = "0xB800:0000"
 DOS_VIDEO_PAGE_TWO = "0xB800:1000"

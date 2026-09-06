@@ -21,6 +21,12 @@ from loguru import logger
 
 from .dbx_kbd import DBX_KEY, DBX_KEY_TO_QCODE, char_needs_shift, char_to_qcode
 
+__all__ = [
+    "CpuNotStoppedError",
+    "QMPClient",
+    "QMPError",
+]
+
 
 class QMPError(Exception):
     """QMP protocol error."""

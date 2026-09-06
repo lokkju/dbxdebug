@@ -63,36 +63,42 @@ Then delete the vendored copy. Nothing in the consumer should still import
 
 | What you had | Where it lives now |
 |---|---|
-| The launcher class (`Popen`, ports, cleanup) | `from dbxdebug.session import DosboxSession` |
+| The launcher class (`Popen`, ports, cleanup) | `from dbxdebug import DosboxSession` |
 | `dosbox_debug.GDBClient` | `from dbxdebug import GDBClient` |
 | `dosbox_debug.QMPClient`, `QMPError` | `from dbxdebug import QMPClient, QMPError` |
 | `dosbox_debug.GDBError` | No equivalent: see section 3 |
-| The launcher's `bp_addr` | `from dbxdebug.addressing import linear` (and see section 2.2) |
+| The launcher's `bp_addr` | `from dbxdebug import linear` (and see section 2.2) |
 | Screen decoding on the GDB client | `DosboxSession.screen_lines()`, or `from dbxdebug import DOSVideoTools` |
-| Frame walking, if you had it | `from dbxdebug.frames import walk_frames, steps_out` |
-| Finding the emulator binary | `from dbxdebug.paths import find_dosbox_x`, or `$DBXDEBUG_DOSBOX` |
+| Frame walking, if you had it | `from dbxdebug import walk_frames, steps_out` |
+| Finding the emulator binary | `from dbxdebug import find_dosbox_x`, or `$DBXDEBUG_DOSBOX` |
 | Nothing: this is new | `from dbxdebug.registry import list_sessions`; the `dbxdebug session` and `dbxdebug doctor` CLI |
 
-### The surface is not tidy, and this is worth knowing before you write imports
+### Where to import from
 
-`dbxdebug/__init__.py` exports the original client surface only. The newer
-modules -- the session, the registry, the addressing helpers, the frame
-walker -- are importable from their own modules and nowhere else. So the
-package's primary entry point is the one thing you cannot import from the
-package root:
+Everything a debugging script needs comes from the package root:
 
 ```python
->>> from dbxdebug import GDBClient, QMPClient, DOSVideoTools   # fine
->>> from dbxdebug import DosboxSession
-ImportError: cannot import name 'DosboxSession' from 'dbxdebug'
->>> from dbxdebug.session import DosboxSession                 # this is the way
+from dbxdebug import DosboxSession, GDBClient, QMPClient, DOSVideoTools, linear
 ```
 
-This is self-consistent (no newer module is exported, so there is no
-arbitrary line) but it is an odd shape, and it is an open question, not a
-settled convention: lokkju/dbxdebug#7. Import from the modules for now. If
-the re-exports land, module-level imports keep working, so nothing written
-today has to be rewritten.
+The rule is that every module declares its surface in `__all__` and the root
+re-exports the union of the library modules' `__all__`. The exceptions are
+`dbxdebug.cli`, `dbxdebug.registry` and `dbxdebug.doctor`, the `dbxdebug`
+command's own machinery, whose names say nothing unqualified:
+
+```python
+from dbxdebug.registry import list_sessions, reap
+from dbxdebug import doctor
+```
+
+Module-path imports work for everything, root or not, and the examples
+further down use them where naming the module makes the call clearer
+(`addressing.bp_addr`, `frames.steps_out`). Nothing you write either way
+has to be rewritten later.
+
+If `from dbxdebug import DosboxSession` raises `ImportError`, you are on a
+build from before lokkju/dbxdebug#7 landed; `from dbxdebug.session import
+DosboxSession` works there.
 
 ### The launcher itself
 
@@ -105,7 +111,7 @@ so only a SIGKILL of the owner can leave a stray emulator behind (which is
 what `dbxdebug session reap` is for).
 
 ```python
-from dbxdebug.session import DosboxSession
+from dbxdebug import DosboxSession
 
 with DosboxSession(mounts={"c": "/path/to/host/dir"}, autoexec=["c:"]) as session:
     session.qmp.type_text("PROG\r")

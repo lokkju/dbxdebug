@@ -41,6 +41,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+__all__ = [
+    "DEFAULT_REGISTRY",
+    "RegisteredSession",
+    "format_table",
+    "free_port",
+    "kill_group",
+    "list_sessions",
+    "port_is_listening",
+    "reap",
+    "registry_dir",
+    "wait_ports_free",
+]
+
 # Where live-session files live by default, when DBXDEBUG_REGISTRY is unset.
 # Informational only -- `registry_dir` re-reads the environment variable on
 # every call rather than trusting this constant, so tests can point a fresh

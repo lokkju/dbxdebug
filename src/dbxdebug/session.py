@@ -58,7 +58,7 @@ established for working.
 
 USAGE::
 
-    from dbxdebug.session import DosboxSession
+    from dbxdebug import DosboxSession        # or dbxdebug.session
 
     with DosboxSession(program=Path("PROG.EXE"), mounts={"c": src_dir}) as s:
         s.gdb_port, s.qmp_port, s.pid, s.workdir   # the handle
@@ -110,6 +110,15 @@ from .registry import (
     registry_dir,
 )
 from .video import decode_text_screen
+
+__all__ = [
+    "DEFAULT_CONF",
+    "DEFAULT_SDL_OUTPUT",
+    "DosboxLaunchError",
+    "DosboxSession",
+    "HEADLESS_ENV",
+    "render_conf",
+]
 
 # `[sdl] output`. NOT `opengl`: measured back to back on an idle host,
 # `opengl` accumulates emulated time roughly 8.6x more slowly than `surface`

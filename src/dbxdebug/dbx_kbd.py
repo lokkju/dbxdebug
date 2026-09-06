@@ -9,6 +9,16 @@ This module provides:
 
 from enum import IntEnum
 
+__all__ = [
+    "DBX_KEY",
+    "DBX_KEY_TO_QCODE",
+    "QCODE_TO_DBX_KEY",
+    "char_needs_shift",
+    "char_to_qcode",
+    "dbx_key_to_qcode",
+    "qcode_to_dbx_key",
+]
+
 
 class DBX_KEY(IntEnum):
     """DOSBox-X internal keyboard key codes."""
