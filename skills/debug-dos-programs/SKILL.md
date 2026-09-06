@@ -244,11 +244,13 @@ So, verified behaviour:
 
 - The GDB connection **survives** the break. The read that follows is still
   answered with its own bytes.
-- Learn that the CPU stopped from **`gdb.take_pending_stops()`** — it returns
-  the queued stop replies and empties the queue — or by polling
-  **`qmp.query_status()["running"]`** on the separate QMP socket. Either
-  works; the QMP poll is what you want when you are waiting rather than
-  reacting.
+- Learn that the CPU stopped from **`gdb.wait_for_stop(timeout=...)`** — it
+  polls for you and returns the stop reply, or None if none arrives — or from
+  **`gdb.take_pending_stops()`**, which returns the queued stop replies and
+  empties the queue. Both read the socket themselves, so neither needs any
+  other GDB request to shake a stop loose (lokkju/dbxdebug#18, fixed).
+  Polling **`qmp.query_status()["running"]`** on the separate QMP socket works
+  too, and is what you want when you are not otherwise talking GDB.
 - A plain `Z0` breakpoint armed while free-running is **inert** and is not a
   trigger — activation only happens on continue. This is why the ordinary
   breakpoint recipe (`halt` → `set_breakpoint` → `continue_execution`) is

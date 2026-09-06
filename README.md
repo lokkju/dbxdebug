@@ -372,6 +372,7 @@ with GDBClient() as gdb:                       # localhost:2159
     gdb.set_breakpoint("1000:0020")            # the same address, seg:off form
     gdb.step()
     gdb.continue_execution()
+    gdb.wait_for_stop(timeout=30.0)            # a stop NOBODY asked for
 
 with QMPClient() as qmp:                       # localhost:4444
     qmp.send_key(CTRL_C)
@@ -411,9 +412,12 @@ break-on-exec fires one nobody asked for) and a timed-out request leaving its
 reply in the stream -- and both are handled at the framing layer:
 
 * an unrequested stop reply is diverted to `gdb.pending_stops` instead of
-  being read as an answer. Drain it with `gdb.take_pending_stops()`; the
-  queue keeps the most recent 64. This is how you learn the CPU stopped
-  without polling QMP;
+  being read as an answer. Drain it with `gdb.take_pending_stops()`, or wait
+  on it with `gdb.wait_for_stop(timeout=...)`; both read the socket
+  themselves, so no other request is needed to shake a stop loose
+  ([#18](https://github.com/lokkju/dbxdebug/issues/18), fixed). The queue
+  keeps the most recent 64. This is how you learn the CPU stopped without
+  polling QMP;
 * an abandoned exchange is drained before the next packet is sent, so the
   request after a `GDBTimeoutError` gets its own reply rather than the
   previous one's;

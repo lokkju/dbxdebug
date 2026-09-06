@@ -18,6 +18,7 @@ counterparts are in `tests/integration/test_live_session.py`.
 """
 
 import socket
+import time
 
 import pytest
 
@@ -130,9 +131,54 @@ class FakeSocket:
         assert isinstance(chunk, bytes)
         return chunk
 
+    def feed(self, *chunks: bytes | type[Timeout]) -> None:
+        """Queue more chunks, as bytes arriving after the reader has looked.
+
+        Args:
+            *chunks: Byte strings to return from later `recv` calls, and
+                `Timeout` markers to raise at.
+        """
+        self._chunks.extend(chunks)
+
     def close(self) -> None:
         """Mark the socket closed."""
         self.closed = True
+
+
+class ConnectedSocket:
+    """A REAL socket presented as one `GDBClient` can connect: `connect` no-ops.
+
+    `FakeSocket` cannot show that the unsolicited-stop poll does not block --
+    its `recv` answers instantly whatever the timeout is. This wraps one end
+    of a live `socketpair` so that `recv`, `settimeout` and non-blocking mode
+    are the kernel's own, which is the only way to prove the poll returns
+    while the socket is idle rather than waiting out its 30s deadline.
+    """
+
+    def __init__(self, sock: socket.socket) -> None:
+        """Wrap an already-connected socket.
+
+        Args:
+            sock: The live socket to delegate to.
+        """
+        self._sock = sock
+
+    def connect(self, address: tuple[str, int]) -> None:
+        """Accept any address; the socket is connected already."""
+
+    def setsockopt(self, level: int, optname: int, value: int) -> None:
+        """No-op: TCP_NODELAY is meaningless on an AF_UNIX socketpair."""
+
+    def __getattr__(self, name: str) -> object:
+        """Delegate everything else -- `recv`, `sendall`, `settimeout` -- to the real socket.
+
+        Args:
+            name: Attribute to fetch from the wrapped socket.
+
+        Returns:
+            The wrapped socket's attribute.
+        """
+        return getattr(self._sock, name)
 
 
 def connect(
@@ -156,6 +202,29 @@ def connect(
     fake = FakeSocket([b"+", gdb_packet(CURRENT_BUILD_REPLY), *chunks])
     monkeypatch.setattr("socket.socket", lambda *_args, **_kwargs: fake)
     return GDBClient(**kwargs), fake  # type: ignore[arg-type]
+
+
+def connect_over_socketpair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[GDBClient, socket.socket]:
+    """Build a `GDBClient` over one end of a real `socketpair`.
+
+    The handshake's ACK and `qSupported` reply are written to the far end
+    first, so the constructor's blocking read is satisfied without a thread.
+
+    Args:
+        monkeypatch: Used to swap `socket.socket`.
+
+    Returns:
+        The connected client and the far end of the pair, which stands in
+        for the stub.
+    """
+    stub, ours = socket.socketpair()
+    stub.sendall(b"+" + gdb_packet(CURRENT_BUILD_REPLY))
+    monkeypatch.setattr("socket.socket", lambda *_a, **_k: ConnectedSocket(ours))
+    client = GDBClient()  # type: ignore[call-arg]
+    stub.recv(4096)  # the qSupported packet and its ACK, off the wire
+    return client, stub
 
 
 def test_connect_arms_the_default_read_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -434,3 +503,166 @@ def test_stop_replies_are_recognised(payload: bytes) -> None:
 def test_ordinary_replies_are_not_mistaken_for_stop_replies(payload: bytes) -> None:
     """No answer this stub gives to a non-resuming packet looks like a stop reply."""
     assert not looks_like_stop_reply(payload)
+
+
+def test_pending_stops_reads_the_socket_rather_than_waiting_for_another_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The queue services itself: nothing else has to read for a stop to show up.
+
+    The queue used to fill only as a side effect of some other request
+    passing through the framing layer, so an unsolicited `S05` sat unread in
+    the kernel buffer and a caller polling this property spun forever on a
+    stop that had genuinely happened (lokkju/dbxdebug#18). No request is
+    issued here at all.
+    """
+    client, _fake = connect(monkeypatch, [gdb_packet(b"S05")])
+
+    assert client.pending_stops == (b"S05",)
+    assert client.take_pending_stops() == [b"S05"]
+    assert client.pending_stops == ()
+
+
+def test_take_pending_stops_reads_the_socket_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Draining polls first, so a stop that has arrived is returned, not missed."""
+    client, _fake = connect(monkeypatch, [gdb_packet(b"S05"), gdb_packet(b"T05thread:01;")])
+
+    assert client.take_pending_stops() == [b"S05", b"T05thread:01;"]
+
+
+def test_polling_acknowledges_the_stop_it_picks_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A packet read by the poll is ACKed like any other, so the stub does not resend."""
+    client, fake = connect(monkeypatch, [gdb_packet(b"S05")])
+    sent_before = len(fake.sent)
+
+    assert client.pending_stops == (b"S05",)
+    assert fake.sent[sent_before:] == [b"+"]
+
+
+def test_polling_leaves_a_half_arrived_stop_reply_intact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A packet still in flight is not consumed in pieces; the next poll gets it whole."""
+    client, fake = connect(monkeypatch, [b"$S0"])
+
+    assert client.pending_stops == ()
+
+    fake.feed(b"5#b8")
+    assert client.pending_stops == (b"S05",)
+
+
+def test_polling_does_not_touch_a_reply_that_is_still_owed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A poll must not consume bytes belonging to a request already on the wire.
+
+    This is the reentrancy hazard the self-servicing queue creates: after a
+    `GDBTimeoutError` the stub still owes the abandoned request's reply, and
+    those bytes are that request's, not the queue's. Reading them here would
+    strand the resynchronisation that the next request performs -- so the
+    poll is inert until nothing is owed, and the drain still recovers the
+    stop exactly once.
+    """
+    client, _fake = connect(
+        monkeypatch,
+        [b"+", Timeout, gdb_packet(b"S05"), b"+", gdb_packet(ROM_HEX)],
+    )
+    with pytest.raises(GDBTimeoutError):
+        client.continue_execution()
+
+    assert client.pending_stops == ()
+    assert client.take_pending_stops() == []
+
+    assert client.read_memory(0xFFFF0, 16) == bytes.fromhex(ROM_HEX.decode())
+    assert client.pending_stops == (b"S05",)
+
+
+def test_polling_an_unusable_client_reports_an_empty_queue_rather_than_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reading a queue is not a request, so it does not resurrect a desync error."""
+    client, _fake = connect(monkeypatch, [])
+    client._unusable = "stream position unknown"
+
+    assert client.pending_stops == ()
+    assert client.take_pending_stops() == []
+
+
+def test_wait_for_stop_returns_the_oldest_stop_and_removes_only_that_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One call yields one stop; anything behind it stays queued."""
+    client, _fake = connect(monkeypatch, [gdb_packet(b"S05"), gdb_packet(b"T05thread:01;")])
+
+    assert client.wait_for_stop(timeout=0.0) == b"S05"
+    assert client.pending_stops == (b"T05thread:01;",)
+
+
+def test_wait_for_stop_returns_none_when_nothing_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout is reported as None, not as an exception and not as a spin."""
+    client, _fake = connect(monkeypatch, [])
+
+    assert client.wait_for_stop(timeout=0.05, poll=0.01) is None
+
+
+def test_wait_for_stop_refuses_while_a_reply_is_still_owed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Waiting where the poll cannot run would spin forever, so it says so instead.
+
+    The poll is inert while the stub owes an abandoned request's reply, so a
+    `wait_for_stop` in that state could never see anything. Reporting it is
+    the whole point of lokkju/dbxdebug#18: the original failure was a silent
+    spin.
+    """
+    client, _fake = connect(monkeypatch, [b"+", Timeout, gdb_packet(b"S05")])
+    with pytest.raises(GDBTimeoutError):
+        client.continue_execution()
+
+    with pytest.raises(GDBDesyncError, match="still owes a reply"):
+        client.wait_for_stop(timeout=0.0)
+
+
+def test_polling_an_idle_socket_does_not_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The poll is genuinely non-blocking, against a real socket rather than a fake.
+
+    `FakeSocket` answers instantly whatever timeout is armed, so it cannot
+    tell a non-blocking read from a blocking one. Here the socket is the
+    kernel's, the client's read deadline is the full default, and the stub
+    end is silent: a blocking read would sit for `DEFAULT_TIMEOUT`.
+    """
+    client, stub = connect_over_socketpair(monkeypatch)
+    try:
+        assert client.sock is not None
+        assert client.sock.gettimeout() == DEFAULT_TIMEOUT
+
+        started = time.monotonic()
+        assert client.pending_stops == ()
+        assert client.wait_for_stop(timeout=0.0) is None
+        elapsed = time.monotonic() - started
+        assert elapsed < 1.0, f"polling an idle socket took {elapsed:.1f}s"
+
+        # And the timeout the caller armed is restored, not left at zero.
+        assert client.sock.gettimeout() == DEFAULT_TIMEOUT
+    finally:
+        client.close()
+        stub.close()
+
+
+def test_polling_a_real_socket_picks_up_a_stop_and_leaves_the_stream_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Against a real socket: poll, see the stop, then read and get the read's own bytes."""
+    client, stub = connect_over_socketpair(monkeypatch)
+    try:
+        stub.sendall(gdb_packet(b"S05"))
+        assert client.wait_for_stop(timeout=5.0, poll=0.01) == b"S05"
+
+        stub.sendall(b"+" + gdb_packet(ROM_HEX))
+        assert client.read_memory(0xFFFF0, 16) == bytes.fromhex(ROM_HEX.decode())
+        assert client.pending_stops == ()
+    finally:
+        client.close()
+        stub.close()

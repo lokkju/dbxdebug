@@ -116,7 +116,9 @@ assert qmp.query_status()["running"] is False
 
 **The GDB connection survives this.** Drain the unrequested stop with
 `gdb.take_pending_stops()` — it returns the queued stop replies and empties
-the queue — and carry on reading registers and memory. If you would rather
+the queue — and carry on reading registers and memory. You can wait on the
+GDB side instead of over QMP: `gdb.wait_for_stop(timeout=60)` returns the
+stop reply, or None if none arrives. If you would rather
 not deal with an out-of-band stop at all, the alternative is an ordinary
 breakpoint (recipe 5), whose stop reply answers your own `c` and is returned
 to you directly.
