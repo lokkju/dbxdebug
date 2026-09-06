@@ -380,7 +380,16 @@ instruction, before the prologue has run, `BP` still belongs to the caller and
 sits above `SP`, so the entry check passes and `steps_out` measures the
 caller's frame instead. Break *after* the prologue.
 
-**Also a known bound:** a callee that pops BP then jumps to a shared epilogue
-which pops further registers raises SP past `BP+2` while still inside the
-callee, and `steps_out` stops there, early. Telling that apart from a real
-return needs instruction decoding, which this does not do.
+**Also possible:** `FrameWalkError: BP=0xfffc sits at the top of the stack
+segment`. A near return from such a frame would need `SP >= BP+4`, which does
+not fit in 16 bits, so no amount of stepping could recognise it. This is
+rejected on entry rather than stepped at for the whole timeout.
+
+**And a third:** `... did not return within the 10.0s timeout ...; CS:IP never
+reached 1234:010d`. `steps_out` waits for the frame's own recorded return
+address, not merely for SP to clear the return slot, so a callee that raises SP
+without returning is stepped through rather than mistaken for a return. The
+flip side is that a guest which rewrites its own return slot after `steps_out`
+has read it never satisfies the test and fails at a bound instead. The message
+names the address that never arrived, and says whether SP cleared `[BP+2]`
+along the way.

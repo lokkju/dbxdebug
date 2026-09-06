@@ -247,17 +247,24 @@ assert gdb.remove_breakpoint(body_addr)
 steps_out(gdb, timeout=20.0)     # -> the final step's stop reply, as bytes
 ```
 
-`steps_out` records the entry BP and single-steps until `SP & 0xFFFF` is
-strictly greater than `BP + 2` — past the return-address slot, which only the
-`ret` itself reaches, not the `pop bp` or `leave` before it. It raises
-`FrameWalkError` if `SP > BP` on entry, or if neither bound (`timeout`,
-`max_steps`) is met before the frame returns. It never returns silently
-without having stepped out.
+`steps_out` reads the frame's return address from `[BP+2]`/`[BP+4]` once, then
+single-steps until the CPU is at that address with the return slot popped —
+`IP == [BP+2]`, and either `CS` unchanged and `SP >= BP+4` (near) or
+`CS == [BP+4]` and `SP >= BP+6` (far). It raises `FrameWalkError` if `SP > BP`
+on entry, if `BP` is too near the top of SS for a return SP to fit in 16 bits,
+or if neither bound (`timeout`, `max_steps`) is met before the frame returns.
+It never returns silently without having stepped out.
 
 Bounds worth knowing: it always executes at least one instruction (the check
 runs after each step); called at a procedure's first instruction it measures
-the *caller's* frame; and a callee that jumps to a shared epilogue popping
-extra registers stops it early.
+the *caller's* frame; and a guest that rewrites its own return slot is stepped
+to a bound and raised on, naming the address that never arrived, rather than
+stopped somewhere plausible.
+
+`timeout` is the bound that fires at the defaults. An iteration is two GDB
+round-trips and measures ~0.11 ms against a live emulator, so the default
+10 s reaches ~88,000 steps; `max_steps=250_000` sits above that on purpose,
+as the only termination guarantee a caller passing `math.inf` has.
 
 ---
 
