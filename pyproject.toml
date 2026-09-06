@@ -32,8 +32,13 @@ dbxdebug = "dbxdebug.cli:main"
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
-    "ruff>=0.8.0",
-    "pyright>=1.1.0",
+    # These two floors match the `rev:` pins in .pre-commit-config.yaml on
+    # purpose, and are bumped with them. Each tool runs twice against this
+    # repo -- once as a commit hook, once as the resolved dev environment CI
+    # uses -- and a floor low enough to resolve behind the hook lets the two
+    # disagree about the same file (lokkju/dbxdebug#17).
+    "ruff>=0.14.9",
+    "pyright>=1.1.407",
     "pre-commit>=3.5.0",
 ]
 
