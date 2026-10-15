@@ -1,0 +1,54 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/monkescience/yeet/v0.17.0/yeet.schema.json
+#
+# yeet (.github/workflows/yeet.yml) keeps one release PR open from
+# yeet/release-main with the next CHANGELOG.md entry and plugin.json
+# version. Merging it tags vX.Y.Z (annotated) and creates the GitHub
+# Release, which starts .github/workflows/release.yml to build and publish
+# to PyPI. hatch-vcs reads the package version from that tag, so
+# pyproject.toml and uv.lock carry no version for yeet to bump.
+#
+# yeet continues from the v-prefixed tags release-please made (v0.5.0 and
+# earlier). .github/scripts/release-check.sh reads the target and bump types
+# below, so a PR is held to the same idea of "releasable" that yeet uses.
+
+versioning: semver
+timezone: UTC
+telemetry:
+  enabled: false
+
+# release-please ran with bump-minor-pre-major: true and
+# bump-patch-for-minor-pre-major: false, so before 1.0.0 a breaking change
+# bumps minor and a feat bumps minor too (0.4.0 and 0.5.0 were feats).
+pre_major_breaking_bumps_minor: true
+pre_major_features_bump_patch: false
+
+# yeet's defaults, spelled out because release-check.sh reads them.
+bump_types:
+  minor: [feat]
+  patch: [fix, perf]
+
+targets:
+  dbxdebug:
+    type: path
+    path: .
+    tag_prefix: v
+    # The Claude Code plugin manifest; release-please never bumped it, so it
+    # sat at 0.1.0. It now follows the package version.
+    version_files:
+      - path: plugin.json
+        format: json
+        json_pointer: /version
+    changelog:
+      file: CHANGELOG.md
+    # A commit counts only when it touches what the wheel, the PyPI page or
+    # the plugin ships. CHANGELOG.md is excluded so yeet's own release
+    # commits never count; uv.lock and .github so dependabot's PRs (which
+    # touch only those) pass release-check without a no-release label.
+    exclude_paths:
+      - CHANGELOG.md
+      - .github
+      - .gitignore
+      - .pre-commit-config.yaml
+      - docs
+      - tests
+      - uv.lock

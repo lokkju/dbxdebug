@@ -1,0 +1,36 @@
+name: release-check
+
+# Every commit in a PR must be a Conventional Commit, since yeet reads them
+# once they land on main (merge commits, not squash). A PR that changes what a
+# package ships must also either release it (a feat, fix, perf or breaking
+# commit) or say it shouldn't (the no-release label). See
+# .github/scripts/release-check.sh. synchronize re-runs it when commits change;
+# labeled and unlabeled when the label does.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+
+concurrency:
+  group: release-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  release-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # yq (mikefarah), jq and gh come with the ubuntu-latest image.
+      - name: Check the commits are conventional and release what they change
+        run: .github/scripts/release-check.sh
+        env:
+          GH_TOKEN: ${{ github.token }}

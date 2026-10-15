@@ -1,0 +1,75 @@
+name: yeet
+
+# Release PRs. yeet (https://github.com/monkescience/yeet, .yeet.yaml) keeps
+# one release PR open from yeet/release-main, with the next CHANGELOG.md
+# entry and plugin.json version, for the releasable commits since the newest
+# v* tag. The run on that PR's merge commit tags vX.Y.Z, creates the GitHub
+# Release from the entry and relabels the PR. That release starts
+# release.yml, which builds and publishes to PyPI.
+#
+# The lokkju release GitHub App's token does the writing: RELEASE_APP_ID (a
+# variable, the App's client ID) and RELEASE_APP_PRIVATE_KEY (a secret),
+# both pushed by lokkju/infra (release_app_repos). A PR or release created
+# with GITHUB_TOKEN would start no workflows, so neither the release PR's
+# checks nor release.yml would run. The job's own token only reads.
+# yeet refuses pull request and tag checkouts, and skips a run that a newer
+# push has overtaken.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: yeet-release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      # yeet reads the whole history; it writes through the API, not git.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Generate the release App token
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # The release's linux_amd64 binary, checked against its SHA-256 (the
+      # digest GitHub lists for the asset). Upgrading: change the version and
+      # the checksum together, and the schema URL in .yeet.yaml.
+      - name: Install yeet
+        env:
+          YEET_VERSION: v0.17.0
+          YEET_SHA256: 94f0066924449bb0d63026d785ce97840887c3a3f1e88e9d6a7874f28e9c1203
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/yeet.tar.gz" \
+            "https://github.com/monkescience/yeet/releases/download/$YEET_VERSION/yeet_linux_amd64.tar.gz"
+          echo "$YEET_SHA256  $RUNNER_TEMP/yeet.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/yeet"
+          tar -xzf "$RUNNER_TEMP/yeet.tar.gz" -C "$RUNNER_TEMP/yeet" yeet
+          echo "$RUNNER_TEMP/yeet" >> "$GITHUB_PATH"
+
+      # yeet reads GITHUB_URL as a GitHub Enterprise base URL. GitHub-hosted
+      # runners don't set it.
+      - name: yeet release
+        run: yeet release
+        env:
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          DO_NOT_TRACK: "1"

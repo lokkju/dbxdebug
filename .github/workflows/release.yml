@@ -1,20 +1,21 @@
 name: Release
 
-# release-please maintains a "Release vX.Y.Z" PR from the conventional-commit
-# history. Merging that PR updates CHANGELOG.md and the manifest, then creates
-# the vX.Y.Z tag and GitHub Release. hatch-vcs derives the package version from
-# that tag at build time. Publishing must run in this same workflow run, because
-# a tag/release created with GITHUB_TOKEN does not trigger a separate workflow.
+# Builds and publishes a release to PyPI. yeet (yeet.yml) creates the vX.Y.Z
+# tag and GitHub Release when its release PR merges; it does that with the
+# release App's token, so the release starts this workflow (one created with
+# GITHUB_TOKEN would not). hatch-vcs derives the package version from the tag
+# at build time.
+#
+# The publish job stays in this file because PyPI's Trusted Publisher for
+# dbxdebug names release.yml and the pypi environment; moving it means
+# changing the publisher on PyPI first.
 
 on:
-  push:
-    branches: [main]
-  # Recovery path. A tag/release created with GITHUB_TOKEN does not trigger a
-  # workflow, so a publish that fails for an environmental reason (a bad
-  # publisher/metadata pairing, a PyPI outage) cannot be retried by re-running
-  # the original run -- a re-run replays the workflow file from that commit,
-  # including whatever was broken. Dispatch this against the existing tag
-  # instead. It rebuilds from that tag and republishes; it never creates a tag.
+  release:
+    types: [published]
+  # Recovery path. Rebuilds from an existing tag and republishes, for a
+  # publish that failed for an environmental reason (a bad publisher/metadata
+  # pairing, a PyPI outage). It never creates a tag.
   workflow_dispatch:
     inputs:
       tag:
@@ -25,38 +26,20 @@ on:
 permissions: {}
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
 
 jobs:
-  release-please:
-    if: ${{ github.event_name == 'push' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write # create the release + tag
-      pull-requests: write # open/maintain the release PR
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-    steps:
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
-        id: release
-        with:
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-
   # Full CI (lint + format + pyright + test matrix + build) gates the publish.
   # If anything here fails, the publish job below is skipped and nothing ships.
   ci:
-    needs: release-please
-    if: ${{ !cancelled() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v') }}
     permissions:
       contents: read
     uses: ./.github/workflows/test.yml
 
   publish:
-    needs: [release-please, ci]
-    if: ${{ !cancelled() && needs.ci.result == 'success' && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
+    needs: ci
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -64,11 +47,14 @@ jobs:
     permissions:
       id-token: write # OIDC for PyPI Trusted Publishing
       contents: write # upload built artifacts to the GitHub Release
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.release-please.outputs.tag_name }}
+          ref: ${{ env.TAG }}
           fetch-depth: 0 # Full history + tags for hatch-vcs version
+          persist-credentials: false
 
       - name: Install uv and set up Python
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -84,4 +70,4 @@ jobs:
       - name: Attach artifacts to the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.release-please.outputs.tag_name }}" dist/* --clobber
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
